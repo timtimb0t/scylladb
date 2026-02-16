@@ -132,7 +132,7 @@ distribute_reshard_jobs(sstables::sstable_directory::sstable_open_info_vector so
 // A creator function must be passed that will create an SSTable object in the correct shard,
 // and an I/O priority must be specified.
 future<> reshard(sstables::sstable_directory& dir, sstables::sstable_directory::sstable_open_info_vector shared_info, replica::table& table,
-                           compaction::compaction_sstable_creator_fn creator, compaction::owned_ranges_ptr owned_ranges_ptr, tasks::task_info parent_info)
+                           compaction::compaction_sstable_creator_fn creator, compaction::owned_ranges_ptr owned_ranges_ptr, bool vnodes_resharding, tasks::task_info parent_info)
 {
     // Resharding doesn't like empty sstable sets, so bail early. There is nothing
     // to reshard in this shard.
@@ -166,7 +166,7 @@ future<> reshard(sstables::sstable_directory& dir, sstables::sstable_directory::
             auto erm = table.get_effective_replication_map(); // keep alive around compaction.
 
             compaction_descriptor desc(sstlist);
-            desc.options = compaction_type_options::make_reshard();
+            desc.options = compaction_type_options::make_reshard(vnodes_resharding);
             desc.creator = creator;
             desc.sharder = &erm->get_sharder(*table.schema());
             desc.owned_ranges = owned_ranges_ptr;
@@ -906,7 +906,7 @@ future<> table_resharding_compaction_task_impl::run() {
         if (_owned_ranges_ptr) {
             local_owned_ranges_ptr = make_lw_shared<const dht::token_range_vector>(*_owned_ranges_ptr);
         }
-        auto task = co_await compaction_module.make_and_start_task<shard_resharding_compaction_task_impl>(parent_info, _status.keyspace, _status.table, _status.id, _dir, db, _creator, std::move(local_owned_ranges_ptr), destinations);
+        auto task = co_await compaction_module.make_and_start_task<shard_resharding_compaction_task_impl>(parent_info, _status.keyspace, _status.table, _status.id, _dir, db, _creator, std::move(local_owned_ranges_ptr), _vnodes_resharding, destinations);
         co_await task->done();
     }));
 
@@ -926,12 +926,14 @@ shard_resharding_compaction_task_impl::shard_resharding_compaction_task_impl(tas
         replica::database& db,
         compaction_sstable_creator_fn creator,
         compaction::owned_ranges_ptr local_owned_ranges_ptr,
+        bool vnodes_resharding,
         std::vector<replica::reshard_shard_descriptor>& destinations) noexcept
     : resharding_compaction_task_impl(module, tasks::task_id::create_random_id(), 0, "shard", std::move(keyspace), std::move(table), "", parent_id)
     , _dir(dir)
     , _db(db)
     , _creator(std::move(creator))
     , _local_owned_ranges_ptr(std::move(local_owned_ranges_ptr))
+    , _vnodes_resharding(vnodes_resharding)
     , _destinations(destinations)
 {
     _expected_workload = _destinations[this_shard_id()].size();
@@ -941,7 +943,7 @@ future<> shard_resharding_compaction_task_impl::run() {
     auto& table = _db.find_column_family(_status.keyspace, _status.table);
     auto info_vec = std::move(_destinations[this_shard_id()].info_vec);
     tasks::task_info info{_status.id, _status.shard};
-    co_await reshard(_dir.local(), std::move(info_vec), table, _creator, std::move(_local_owned_ranges_ptr), info);
+    co_await reshard(_dir.local(), std::move(info_vec), table, _creator, std::move(_local_owned_ranges_ptr), _vnodes_resharding, info);
     co_await _dir.local().move_foreign_sstables(_dir);
 }
 
