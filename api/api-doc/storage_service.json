@@ -3187,6 +3187,26 @@
          }]
       },
       {
+         "path":"/storage_service/vnode_tablet_migrations/node/storage_mode",
+         "operations":[{
+             "method":"PUT",
+             "summary":"Set the intended storage mode for this node during vnodes-to-tablets migration",
+             "type":"void",
+             "nickname":"set_vnode_tablet_migration_node_storage_mode",
+             "produces":["application/json"],
+             "parameters":[
+                 {
+                     "name":"intended_mode",
+                     "description":"Intended storage mode (tablets or vnodes)",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                 }
+             ]
+         }]
+      },
+      {
          "path":"/storage_service/quiesce_topology",
          "operations":[
             {

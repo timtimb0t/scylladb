@@ -4124,6 +4124,81 @@ future<> storage_service::prepare_for_tablets_migration(const sstring& ks_name) 
     }
 }
 
+future<> storage_service::set_node_intended_storage_mode(intended_storage_mode mode) {
+    if (this_shard_id() != 0) {
+        co_return co_await container().invoke_on(0, [mode] (auto& ss) {
+            return ss.set_node_intended_storage_mode(mode);
+        });
+    }
+
+    auto& raft_server = _group0->group0_server();
+    auto holder = _group0->hold_group0_gate();
+
+    slogger.info("Setting intended storage mode for node {} to {}", raft_server.id(), mode);
+
+    while (true) {
+        auto guard = co_await _group0->client().start_operation(_group0_as, raft_timeout{});
+
+        // Make sure that a migration has been started, i.e.,
+        // prepare_for_tablets_migration() has been called for at least one
+        // keyspace. prepare_for_tablets_migration() will fail if
+        // intended_storage_mode is already set for any node.
+        const auto& tablet_metadata = get_token_metadata().tablets();
+        bool has_any_migrating_table = false;
+        for (const auto& ks : _db.local().get_non_system_keyspaces()) {
+            auto& keyspace = _db.local().find_keyspace(ks);
+            if (!keyspace.uses_tablets()) {
+                for (const auto& schema : keyspace.metadata()->tables()) {
+                    if (tablet_metadata.has_tablet_map(schema->id())) {
+                        has_any_migrating_table = true;
+                        break;
+                    }
+                }
+            }
+            if (has_any_migrating_table) {
+                break;
+            }
+        }
+        if (!has_any_migrating_table) {
+            throw std::runtime_error(::format("Cannot set intended storage mode to {}: no migration is in progress. You need to start a migration first.", mode));
+        }
+
+        auto it = _topology_state_machine._topology.find(raft_server.id());
+        if (!it) {
+            throw std::runtime_error(::format("Node {} is not a member of the cluster", raft_server.id()));
+        }
+
+        const auto& rs = it->second;
+
+        if (rs.state != node_state::normal) {
+            throw std::runtime_error(::format("Node {} is not in the normal state (current state: {})", raft_server.id(), rs.state));
+        }
+
+        if (rs.storage_mode == mode) {
+            slogger.info("Node {} already has intended storage mode set to {}, skipping", raft_server.id(), mode);
+            co_return;
+        }
+
+        topology_mutation_builder builder(guard.write_timestamp());
+        builder.with_node(raft_server.id())
+               .set("intended_storage_mode", mode);
+
+        topology_change change{{builder.build()}};
+        group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard,
+            ::format("set intended storage mode for node {} to {}", raft_server.id(), mode));
+
+        try {
+            co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), _group0_as);
+        } catch (group0_concurrent_modification&) {
+            slogger.info("set_node_intended_storage_mode: concurrent modification, retrying");
+            continue;
+        }
+        break;
+    }
+
+    slogger.info("Successfully set intended storage mode for node {} to {}", raft_server.id(), mode);
+}
+
 future<> storage_service::process_tablet_split_candidate(table_id table) noexcept {
     tasks::task_info tablet_split_task_info;
 
