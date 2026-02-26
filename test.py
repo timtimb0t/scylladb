@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import shlex
 import textwrap
 from random import randint
@@ -72,6 +73,51 @@ PYTEST_RUNNER_DIRECTORIES = [
 ]
 
 launch_time = time.monotonic()
+
+class ThreadsCalculator:
+    """
+    The ThreadsCalculator class calculates the number of jobs that can be run concurrently based on system
+    memory and CPU constraints. It allows resource reservation and configurable parameters for
+    flexible job scheduling in various modes, such as `debug`.
+    """
+
+    def __init__(self,
+                 modes: list[str],
+                 min_system_memory_reserve: float = 5e9,
+                 max_system_memory_reserve: float = 8e9,
+                 system_memory_reserve_fraction = 16,
+                 max_test_memory: float = 5e9,
+                 test_memory_fraction: float = 8.0,
+                 debug_test_memory_multiplier: float = 1.5,
+                 debug_cpus_per_test_job=1.5,
+                 non_debug_cpus_per_test_job: float =1.0,
+                 non_debug_max_test_memory: float = 4e9
+                 ):
+        sys_mem = int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+        test_mem = min(sys_mem / test_memory_fraction, max_test_memory)
+        if "debug" in modes:
+            test_mem *= debug_test_memory_multiplier
+        system_memory_reserve = int(min(
+            max(sys_mem / system_memory_reserve_fraction, min_system_memory_reserve),
+            max_system_memory_reserve,
+        ))
+        available_mem = max(0, sys_mem - system_memory_reserve)
+        is_debug = "debug" in modes
+        test_mem = min(
+            sys_mem / test_memory_fraction,
+            max_test_memory if is_debug else non_debug_max_test_memory,
+        )
+        if is_debug:
+            test_mem *= debug_test_memory_multiplier
+        self.cpus_per_test_job = (
+            debug_cpus_per_test_job if is_debug else non_debug_cpus_per_test_job
+        )
+        self.default_num_jobs_mem = max(1, int(available_mem // test_mem))
+
+    def get_number_of_threads(self, nr_cpus: int) -> int:
+        default_num_jobs_cpu = max(1, math.ceil(nr_cpus / self.cpus_per_test_job))
+        return min(self.default_num_jobs_mem, default_num_jobs_cpu)
+
 
 
 class TabularConsoleOutput:
@@ -273,6 +319,13 @@ def parse_cmd_line() -> argparse.Namespace:
     if args.skip_patterns and args.k:
         parser.error(palette.fail('arguments --skip and -k are mutually exclusive, please use only one of them'))
 
+    if not args.modes:
+        try:
+            args.modes = get_configured_modes()
+        except Exception:
+            print(palette.fail("Failed to read output of `ninja mode_list`: please run ./configure.py first"))
+            raise
+
     if not args.jobs:
         if not args.cpus:
             nr_cpus = multiprocessing.cpu_count()
@@ -280,19 +333,7 @@ def parse_cmd_line() -> argparse.Namespace:
             nr_cpus = int(subprocess.check_output(
                 ['taskset', '-c', args.cpus, 'python3', '-c',
                  'import os; print(len(os.sched_getaffinity(0)))']))
-
-        cpus_per_test_job = 1
-        sysmem = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
-        testmem = 6e9 if os.sysconf('SC_PAGE_SIZE') > 4096 else 2e9
-        default_num_jobs_mem = ((sysmem - 4e9) // testmem)
-        args.jobs = min(default_num_jobs_mem, nr_cpus // cpus_per_test_job)
-
-    if not args.modes:
-        try:
-            args.modes = get_configured_modes()
-        except Exception:
-            print(palette.fail("Failed to read output of `ninja mode_list`: please run ./configure.py first"))
-            raise
+        args.jobs = ThreadsCalculator(args.modes).get_number_of_threads(nr_cpus)
 
     if not args.coverage_modes and args.coverage:
         args.coverage_modes = list(args.modes)
@@ -350,16 +391,12 @@ def run_pytest(options: argparse.Namespace) -> tuple[int, list[SimpleNamespace]]
     if options.list_tests:
         args.extend(['--collect-only', '--quiet', '--no-header'])
     else:
-        threads = int(options.jobs)
-        # debug mode is very CPU and memory hungry, so we need to lower the number of threads to be able to finish tests
-        if 'debug' in options.modes:
-            threads = int(threads * 0.5)
         args.extend([
             "--log-level=DEBUG",  # Capture logs
             f'--junit-xml={junit_output_file}',
             "-rf",
             '--test-py-init',
-            f'-n{threads}',
+            f'-n{options.jobs}',
             f'--tmpdir={temp_dir}',
             f'--maxfail={options.max_failures}',
             f'--alluredir={report_dir / f"allure_{HOST_ID}"}',
