@@ -289,6 +289,7 @@ public:
     // persists them to group0.
     future<> prepare_for_tablets_migration(const sstring& ks_name);
     future<> set_node_intended_storage_mode(intended_storage_mode mode);
+    future<> finalize_tablets_migration(const sstring& ks_name);
 
     void start_tablet_split_monitor();
 private:

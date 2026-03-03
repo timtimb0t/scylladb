@@ -3207,6 +3207,26 @@
          }]
       },
       {
+         "path":"/storage_service/vnode_tablet_migrations/keyspaces/{keyspace}/finalization",
+         "operations":[{
+             "method":"POST",
+             "summary":"Finalize vnodes-to-tablets migration for all tables in a keyspace",
+             "type":"void",
+             "nickname":"finalize_vnode_tablet_migration",
+             "produces":["application/json"],
+             "parameters":[
+                 {
+                     "name":"keyspace",
+                     "description":"Keyspace name",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"path"
+                 }
+             ]
+         }]
+      },
+      {
          "path":"/storage_service/quiesce_topology",
          "operations":[
             {

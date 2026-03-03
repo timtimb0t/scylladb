@@ -4199,6 +4199,78 @@ future<> storage_service::set_node_intended_storage_mode(intended_storage_mode m
     slogger.info("Successfully set intended storage mode for node {} to {}", raft_server.id(), mode);
 }
 
+future<> storage_service::finalize_tablets_migration(const sstring& ks_name) {
+    if (this_shard_id() != 0) {
+        co_return co_await container().invoke_on(0, [&ks_name] (auto& ss) {
+            return ss.finalize_tablets_migration(ks_name);
+        });
+    }
+
+    slogger.info("Finalizing vnodes-to-tablets migration for keyspace '{}'", ks_name);
+
+    utils::UUID request_id;
+
+    while (true) {
+        auto guard = co_await _group0->client().start_operation(_group0_as, raft_timeout{});
+
+        auto& db = _db.local();
+        auto& ks = db.find_keyspace(ks_name);
+
+        if (ks.uses_tablets()) {
+            throw std::runtime_error(fmt::format("Keyspace '{}' already uses tablets", ks_name));
+        }
+
+        const auto& tm = get_token_metadata();
+        const auto& tablet_metadata = tm.tablets();
+
+        auto tables = ks.metadata()->tables();
+        if (tables.empty()) {
+            throw std::runtime_error(fmt::format("Keyspace '{}' has no tables", ks_name));
+        }
+
+        for (const auto& schema : tables) {
+            if (!tablet_metadata.has_tablet_map(schema->id())) {
+                throw std::runtime_error(fmt::format("Table {}.{} does not have a tablet map; "
+                    "all tables in keyspace '{}' must be prepared for migration before finalizing",
+                    ks_name, schema->cf_name(), ks_name));
+            }
+        }
+
+        slogger.info("All {} table(s) in keyspace '{}' have tablet maps, submitting finalization request",
+                     tables.size(), ks_name);
+
+        request_id = guard.new_group0_state_id();
+
+        topology_mutation_builder builder(guard.write_timestamp());
+        builder.queue_global_topology_request_id(request_id);
+
+        topology_request_tracking_mutation_builder rtbuilder(request_id, _feature_service.topology_requests_type_column);
+        rtbuilder.set("done", false)
+                 .set("start_time", db_clock::now())
+                 .set("request_type", global_topology_request::finalize_migration)
+                 .set_finalize_migration_data(ks_name);
+
+        topology_change change{{builder.build(), rtbuilder.build()}};
+        group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard,
+            fmt::format("finalize vnodes-to-tablets migration for keyspace '{}'", ks_name));
+
+        try {
+            co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), _group0_as, raft_timeout{});
+        } catch (group0_concurrent_modification&) {
+            slogger.info("finalize_tablets_migration: concurrent modification, retrying");
+            continue;
+        }
+        break;
+    }
+
+    auto error = co_await wait_for_topology_request_completion(request_id);
+    if (!error.empty()) {
+        throw std::runtime_error(fmt::format("Migration finalization failed for keyspace '{}': {}", ks_name, error));
+    }
+
+    slogger.info("Successfully finalized vnodes-to-tablets migration for keyspace '{}'", ks_name);
+}
+
 future<> storage_service::process_tablet_split_candidate(table_id table) noexcept {
     tasks::task_info tablet_split_task_info;
 

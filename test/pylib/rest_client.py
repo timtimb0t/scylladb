@@ -336,6 +336,10 @@ class ScyllaRESTAPIClient:
         """Set the node's intended storage mode to vnodes"""
         await self.client.put_json(f"/storage_service/vnode_tablet_migrations/node/storage_mode?intended_mode=vnodes", host=node_ip)
 
+    async def finalize_vnode_tablet_migration(self, node_ip: str, ks: str) -> None:
+        """Finalize vnodes-to-tablets migration for all tables in a keyspace"""
+        await self.client.post(f"/storage_service/vnode_tablet_migrations/keyspaces/{ks}/finalization", host=node_ip)
+
     async def keyspace_upgrade_sstables(self, node_ip: str, ks: str) -> None:
         await self.client.get(f"/storage_service/keyspace_upgrade_sstables/{ks}", host=node_ip)
 
