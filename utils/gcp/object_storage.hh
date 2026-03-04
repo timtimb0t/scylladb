@@ -154,7 +154,10 @@ namespace utils::gcp::storage {
          * Creates a data_source for reading from a named object.
          */
         seekable_data_source create_download_source(std::string_view bucket, std::string_view object_name, seastar::abort_source* = nullptr) const;
-
+        /**
+         * Checks if an object exists.
+         */
+        future<bool> object_exists(std::string_view bucket, std::string_view object_name, seastar::abort_source* as = nullptr) const;
         /**
          * Destroys resources. Must be called before releasing object
          */

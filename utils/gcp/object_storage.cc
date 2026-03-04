@@ -1156,6 +1156,25 @@ seekable_data_source utils::gcp::storage::client::create_download_source(std::st
     return seekable_data_source(std::make_unique<object_data_source>(_impl, bucket, object_name, as));
 }
 
+future<bool> storage::client::object_exists(std::string_view bucket, std::string_view object_name, seastar::abort_source* as) const {
+    gcp_storage.debug("Get object metadata {}:{}", bucket, object_name);
+
+    auto path = fmt::format("/storage/v1/b/{}/o/{}", bucket, seastar::http::internal::url_encode(object_name));
+    try {
+        auto res = co_await _impl->send_with_retry(path, GCP_OBJECT_SCOPE_READ_ONLY, ""s, ""s, httpclient::method_type::GET, {}, as);
+        if (res.result() != status_type::ok) {
+            throw failed_operation(
+                fmt::format("Could not retrieve object metadata {}:{}: {} ({})", bucket, object_name, res.result(), get_gcp_error_message(res.body())));
+        }
+    } catch (const storage_io_error& e) {
+        if (e.code().value() == ENOENT) {
+            co_return false;
+        }
+        throw;
+    }
+    co_return true;
+}
+
 future<> utils::gcp::storage::client::close() {
     return _impl->close();
 }
