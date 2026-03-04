@@ -284,6 +284,11 @@ public:
     void wake_up_topology_state_machine() noexcept;
     future<> update_tablet_metadata(const locator::tablet_metadata_change_hint& hint);
 
+    // Prepares a vnode-based keyspace for migration to tablets.
+    // Builds tablet maps from vnode token boundaries for all tables and
+    // persists them to group0.
+    future<> prepare_for_tablets_migration(const sstring& ks_name);
+
     void start_tablet_split_monitor();
 private:
     using acquire_merge_lock = bool_class<class acquire_merge_lock_tag>;

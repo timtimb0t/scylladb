@@ -3988,6 +3988,142 @@ future<> storage_service::update_tablet_metadata(const locator::tablet_metadata_
     wake_up_topology_state_machine();
 }
 
+future<> storage_service::prepare_for_tablets_migration(const sstring& ks_name) {
+    if (this_shard_id() != 0) {
+        co_return co_await container().invoke_on(0, [&] (auto& ss) {
+            return ss.prepare_for_tablets_migration(ks_name);
+        });
+    }
+
+    while (true) {
+        auto guard = co_await _group0->client().start_operation(_group0_as);
+
+        auto& db = _db.local();
+        auto& ks = db.find_keyspace(ks_name);
+
+        if (ks.uses_tablets()) {
+            throw std::runtime_error(fmt::format("Keyspace {} already uses tablets", ks_name));
+        }
+
+        const auto& cf_meta_data = ks.metadata().get()->cf_meta_data();
+        if (cf_meta_data.empty()) {
+            throw std::runtime_error(fmt::format("Keyspace {} has no tables to migrate. To use tablets, recreate the keyspace with tablets enabled", ks_name));
+        }
+
+        const auto& tm = get_token_metadata();
+        const auto& sorted_tokens = tm.sorted_tokens();
+        size_t tablet_count = sorted_tokens.size();
+        if (!std::has_single_bit(tablet_count)) {
+            throw std::runtime_error(fmt::format("Table migration requires vnodes to be a power of two. Current value: {}", tablet_count));
+        }
+
+        auto topology = co_await get_system_keyspace().load_topology_state({});
+        for (const auto& [server_id, replica_state]: topology.normal_nodes) {
+            if (replica_state.storage_mode) {
+                throw std::runtime_error(fmt::format("Another migration is in progress (node '{}' has intended storage mode '{}') - cannot start tablets migration."
+                        " Please wait for the current migration to finish and retry.",
+                        server_id, *replica_state.storage_mode));
+            }
+        }
+
+        // Stateful lambdas for round-robin shard assignment per node.
+        std::unordered_map<locator::host_id, std::function<shard_id()>> next_shard_for;
+        tm.for_each_token_owner([&] (const locator::node& node) {
+            auto host = node.host_id();
+            next_shard_for[host] = [num_shards = node.get_shard_count(), idx = 0u]() mutable {
+                return shard_id(idx++ % num_shards);
+            };
+        });
+
+        slogger.info("Building tablet maps for tables in keyspace {} with {} tablet(s)", ks_name, tablet_count);
+
+        // Build a tablet_map from vnode token boundaries.
+        //
+        // The map contains one tablet per vnode. The replicas of each tablet are
+        // the same as the replicas of the corresponding vnode. Shards are assigned
+        // in round-robin fashion per node so that tablets are evenly distributed
+        // within each node.
+        // (FIXME: we should consider tablet sizes as well)
+        //
+        // This map will serve as a template for per-table tablet map mutations.
+        // Each table in the keyspace receives its own tablet map, but all maps
+        // have identical tablet boundaries and replica placement.
+
+        auto erm = ks.get_static_effective_replication_map();
+
+        locator::tablet_map tmap(tablet_count);
+        for (size_t i = 0; i < tablet_count; ++i) {
+            auto tablet = locator::tablet_id(i);
+            auto vnode_replica_hosts = erm->get_natural_replicas(sorted_tokens[i], true);
+            locator::tablet_replica_set tablet_replicas;
+            for (auto host : vnode_replica_hosts) {
+                tablet_replicas.push_back(locator::tablet_replica{host, next_shard_for[host]()});
+            }
+            tmap.set_tablet(tablet, locator::tablet_info(std::move(tablet_replicas)));
+            if (tmap.get_last_token(tablet) != sorted_tokens[i]) {
+                throw std::runtime_error(fmt::format("vnode token {} is not aligned; cannot be used as tablet boundary (expected: {})", sorted_tokens[i], tmap.get_last_token(tablet)));
+            }
+        }
+
+        std::vector<std::pair<table_id, sstring>> tables_to_migrate;
+
+        for (const auto& [name, schema] : cf_meta_data) {
+            auto tid = schema->id();
+            auto& cf = db.find_column_family(tid);
+
+            if (cf.uses_tablets()) {
+                slogger.info("Table {}.{} already uses tablets, skipping", ks_name, name);
+                continue;
+            }
+            tables_to_migrate.push_back({tid, name});
+        }
+
+        if (tables_to_migrate.empty()) {
+            slogger.info("All tables in keyspace {} already use tablets, nothing to do", ks_name);
+            co_return;
+        }
+
+        // Build tablet map mutations for all tables and persist them to group0 (system.tablets)
+        // in a single command.
+        //
+        // FIXME: Tablet map mutations for large keyspaces should be split into
+        // multiple group0 commands to avoid hitting the command size limit.
+        // To maintain atomicity against concurrent migration requests
+        // (e.g., finalization) and prevent failures from group0 conflicts, we
+        // should turn this into a topology request.
+        utils::chunked_vector<canonical_mutation> updates;
+        for (const auto& [tid, cf_name] : tables_to_migrate) {
+            co_await replica::tablet_map_to_mutations(
+                tmap,
+                tid,
+                ks_name,
+                cf_name,
+                guard.write_timestamp(),
+                _feature_service,
+                [&] (mutation m) -> future<> {
+                    updates.emplace_back(co_await make_canonical_mutation_gently(m));
+                });
+        }
+
+        topology_change change{std::move(updates)};
+        group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard,
+            fmt::format("migrate keyspace {} to tablets", ks_name));
+
+        try {
+            co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), _group0_as);
+        } catch (group0_concurrent_modification&) {
+            slogger.info("migrate_to_tablets: concurrent modification, retrying");
+            continue;
+        }
+
+        for (const auto& [tid, cf_name] : tables_to_migrate) {
+            slogger.info("Successfully built tablet map for table {}.{} ({} tablet(s))",
+                         ks_name, cf_name, tablet_count);
+        }
+        break;
+    }
+}
+
 future<> storage_service::process_tablet_split_candidate(table_id table) noexcept {
     tasks::task_info tablet_split_task_info;
 
@@ -5459,6 +5595,8 @@ future<> storage_service::set_tablet_balancing_enabled(bool enabled) {
         }
     }
 }
+
+
 
 future<> storage_service::await_topology_quiesced() {
     auto holder = _async_gate.hold();

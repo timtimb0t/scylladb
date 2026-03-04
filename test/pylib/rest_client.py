@@ -324,6 +324,10 @@ class ScyllaRESTAPIClient:
     async def disable_tablet_balancing(self, node_ip: str) -> None:
         await self.client.post(f"/storage_service/tablets/balancing", host=node_ip, params={"enabled": "false"})
 
+    async def create_vnode_tablet_migration(self, node_ip: str, ks: str) -> None:
+        """Start vnodes-to-tablets migration for all tables in a keyspace"""
+        await self.client.post(f"/storage_service/vnode_tablet_migrations/keyspaces/{ks}", host=node_ip)
+
     async def keyspace_upgrade_sstables(self, node_ip: str, ks: str) -> None:
         await self.client.get(f"/storage_service/keyspace_upgrade_sstables/{ks}", host=node_ip)
 
