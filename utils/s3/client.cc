@@ -166,7 +166,7 @@ future<> client::authorize(http::request& req) {
         }
     }
 
-    auto time_point_str = utils::aws::format_time_point(db_clock::now());
+    auto time_point_str = utils::aws::format_time_point(lowres_system_clock::now());
     auto time_point_st = time_point_str.substr(0, 8);
     req._headers["x-amz-date"] = time_point_str;
     req._headers["x-amz-content-sha256"] = "UNSIGNED-PAYLOAD";
@@ -328,7 +328,7 @@ http::experimental::client::reply_handler client::wrap_handler(http::request& re
             auto should_retry = possible_error->is_retryable();
             if (possible_error->get_error_type() == aws::aws_error_type::REQUEST_TIME_TOO_SKEWED) {
                 s3l.warn("Request failed with REQUEST_TIME_TOO_SKEWED. Machine time: {}, request timestamp: {}",
-                         utils::aws::format_time_point(db_clock::now()),
+                         utils::aws::format_time_point(lowres_system_clock::now()),
                          request.get_header("x-amz-date"));
                 should_retry = utils::http::retryable::yes;
                 co_await authorize(request);
