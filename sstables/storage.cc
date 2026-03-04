@@ -109,6 +109,9 @@ public:
     virtual future<> unlink_component(const sstable& sst, component_type) noexcept override;
 
     virtual sstring prefix() const override { return _dir.native(); }
+    future<bool> exists(const sstable& sst, component_type type) const override {
+        return file_exists(sst.get_filename(type).format());
+    }
 };
 
 future<data_sink> filesystem_storage::make_data_or_index_sink(sstable& sst, component_type type) {
@@ -665,6 +668,10 @@ public:
 
     sstring prefix() const override { 
         return std::visit([] (const auto& v) { return fmt::to_string(v); }, _location); 
+    }
+
+    future<bool> exists(const sstable& sst, component_type type) const override {
+        return _client->object_exists(make_object_name(sst, type), abort_source());
     }
 
     future<> put_object(object_name name, ::memory_data_sink_buffers bufs) {

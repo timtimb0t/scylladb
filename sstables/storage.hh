@@ -124,6 +124,7 @@ public:
     virtual future<> unlink_component(const sstable& sst, component_type) noexcept = 0;
 
     virtual sstring prefix() const  = 0;
+    virtual future<bool> exists(const sstable& sst, component_type type) const = 0;
 };
 
 std::unique_ptr<sstables::storage> make_storage(sstables_manager& manager, const data_dictionary::storage_options& s_opts, sstable_state state);
