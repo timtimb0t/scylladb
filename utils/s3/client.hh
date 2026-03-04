@@ -189,6 +189,7 @@ public:
 
     future<uint64_t> get_object_size(sstring object_name, seastar::abort_source* = nullptr);
     future<stats> get_object_stats(sstring object_name, seastar::abort_source* = nullptr);
+    future<bool> object_exists(sstring object_name, seastar::abort_source* = nullptr);
     future<tag_set> get_object_tagging(sstring object_name, seastar::abort_source* = nullptr);
     future<> put_object_tagging(sstring object_name, tag_set tagging, seastar::abort_source* = nullptr);
     future<> delete_object_tagging(sstring object_name, seastar::abort_source* = nullptr);

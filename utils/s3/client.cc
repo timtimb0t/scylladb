@@ -447,6 +447,18 @@ future<stats> client::get_object_stats(sstring object_name, seastar::abort_sourc
     co_return st;
 }
 
+future<bool> client::object_exists(sstring object_name, seastar::abort_source* as) {
+    try {
+        co_await get_object_header(object_name, ignore_reply, as);
+    } catch (const storage_io_error& e) {
+        if (e.code().value() == ENOENT) {
+            co_return false;
+        }
+        throw;
+    }
+    co_return true;
+}
+
 static rapidxml::xml_node<>* first_node_of(rapidxml::xml_node<>* root,
                                            std::initializer_list<std::string_view> names) {
     SCYLLA_ASSERT(root);
