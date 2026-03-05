@@ -717,28 +717,45 @@ class TestCQLAudit(AuditTester):
     def assert_entries_were_added(self, session: Session, expected_entries: list[AuditEntry], merge_duplicate_rows: bool = True, filter_out_cassandra_auth: bool = False):
         # Get audit entries before executing the query, to later compare with
         # audit entries after executing the query.
-        set_of_rows_before_dict = dict[str, set[AuditEntry]]()
         rows_before_dict = self.get_audit_log_dict(session)
         for mode, rows_before in rows_before_dict.items():
             set_of_rows_before = set(rows_before)
             assert len(set_of_rows_before) == len(rows_before), f"audit {mode} contains duplicate rows: {rows_before}"
-            set_of_rows_before_dict[mode] = set_of_rows_before
         yield
 
         new_rows_dict = dict[str, list[AuditEntry]]()
         def is_number_of_new_rows_correct():
             rows_after_dict = self.get_audit_log_dict(session)
-            set_of_rows_after_dict = dict[str, set[AuditEntry]]()
             for mode, rows_after in rows_after_dict.items():
-                set_of_rows_after = set(rows_after)
-                assert len(set_of_rows_after) == len(rows_after), f"audit {mode} contains duplicate rows: {rows_after}"
-                set_of_rows_after_dict[mode] = set_of_rows_after
+                assert len(set(rows_after)) == len(rows_after), f"audit {mode} contains duplicate rows: {rows_after}"
 
             nonlocal new_rows_dict
             for mode, rows_after in rows_after_dict.items():
-                rows_before = rows_before_dict[mode]
-                new_rows_dict[mode] = rows_after[len(rows_before) :]
-                assert set(new_rows_dict[mode]) == set_of_rows_after_dict[mode] - set_of_rows_before_dict[mode], f"new rows are not the last rows in the audit table: rows_after={rows_after}, set_of_rows_after_dict[{mode}]={set_of_rows_after_dict[mode]}, set_of_rows_before_dict[{mode}]={set_of_rows_before_dict[mode]}"
+                # Different nodes can have different timestamps.
+                # If rows from all the nodes are in one list, we can not be
+                # sure that the new rows are the last rows in the list.
+                # We need to check the new rows for each node separately.
+                after_by_node: dict[str, list[AuditEntry]] = {}
+                for row in rows_after:
+                    after_by_node.setdefault(row.node, []).append(row)
+                before_by_node: dict[str, list[AuditEntry]] = {}
+                for row in rows_before_dict[mode]:
+                    before_by_node.setdefault(row.node, []).append(row)
+
+                new_rows: list[AuditEntry] = []
+                for node, node_after in after_by_node.items():
+                    node_before = before_by_node.get(node, [])
+                    node_new = node_after[len(node_before):]
+                    set_node_new = set(node_new)
+                    set_node_diff = set(node_after) - set(node_before)
+                    assert set_node_new == set_node_diff, (
+                        f"new rows are not the last rows for node {node} in audit {mode}: "
+                        f"tail={node_new}, set_diff={set_node_diff}"
+                    )
+                    new_rows.extend(node_new)
+
+                new_rows.sort(key=lambda row: (row.event_time.time, row.node))
+                new_rows_dict[mode] = new_rows
 
             if merge_duplicate_rows:
                 new_rows_dict = self.deduplicate_audit_entries(new_rows_dict)
