@@ -555,8 +555,16 @@ future<> distributed_loader::init_system_keyspace(sharded<db::system_keyspace>& 
 future<> distributed_loader::init_non_system_keyspaces(sharded<replica::database>& db,
         sharded<service::storage_proxy>& proxy, sharded<db::system_keyspace>& sys_ks) {
     return seastar::async([&db, &proxy, &sys_ks] {
-        db.invoke_on_all([&proxy, &sys_ks] (replica::database& db) {
-            return db.parse_system_tables(proxy, sys_ks);
+        // Load the node's intended storage mode from topology.
+        // This determines the ERM flavor and resharding direction for tables
+        // under vnodes-to-tablets migration.
+        auto topology = sys_ks.local().load_topology_state({}).get();
+        auto host_id = db.local().get_token_metadata().get_my_id();
+        auto node = topology.normal_nodes.find(raft::server_id{host_id.uuid()});
+        std::optional<service::intended_storage_mode> storage_mode = node != topology.normal_nodes.end() ? node->second.storage_mode : std::nullopt;
+
+        db.invoke_on_all([&proxy, &sys_ks, &storage_mode] (replica::database& db) {
+            return db.parse_system_tables(proxy, sys_ks, storage_mode);
         }).get();
 
         const auto& cfg = db.local().get_config();
