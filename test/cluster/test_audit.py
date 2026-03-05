@@ -33,6 +33,7 @@ from test.cluster.dtest.dtest_class import create_ks, wait_for
 from test.cluster.dtest.tools.assertions import assert_invalid
 from test.cluster.dtest.tools.data import rows_to_list, run_in_parallel
 
+from test.cluster.test_config import wait_for_config
 from test.pylib.manager_client import ManagerClient
 from test.pylib.rest_client import read_barrier
 
@@ -127,6 +128,9 @@ class AuditTester:
                 live_cfg = {k: v for k, v in needed.items() if k in LIVE_AUDIT_KEYS}
                 live_cfg["enable_create_table_with_compact_storage"] = enable_compact_storage
                 await self.manager.server_update_config(srv.server_id, config_options=live_cfg)
+                for key in LIVE_AUDIT_KEYS:
+                    if key in live_cfg:
+                        await wait_for_config(self.manager, srv, key, live_cfg[key])
 
     async def _start_fresh_servers(self, needed: dict[str, str],
                                    enable_compact_storage: bool,
@@ -215,7 +219,6 @@ class AuditTester:
         audit_mode = needed.get("audit") or ""
         if "table" not in audit_mode:
             cql.execute("DROP KEYSPACE IF EXISTS audit")
-        helper.clear_audit_logs(cql)
 
         return server_ips
 
@@ -244,6 +247,7 @@ class AuditTester:
         session.execute("DROP KEYSPACE IF EXISTS ks")
         if create_keyspace:
             create_ks(session, "ks", rf)
+        self.helper.clear_audit_logs(session)
         return session
 
 
@@ -403,6 +407,7 @@ class AuditBackendSyslog(AuditBackend):
 
     @override
     def clear_audit_logs(self, session: Session | None = None) -> None:
+        self.unix_socket_listener.get_lines()
         self.unix_socket_listener.lines.clear()
 
     def update_audit_settings(self, audit_settings, modifiers=None):
