@@ -288,6 +288,20 @@ public:
     // Builds tablet maps from vnode token boundaries for all tables and
     // persists them to group0.
     future<> prepare_for_tablets_migration(const sstring& ks_name);
+
+    struct node_migration_status {
+        locator::host_id host_id;
+        sstring current_mode;  // "vnodes" or "tablets"
+        sstring intended_mode; // "vnodes" or "tablets"
+    };
+
+    struct keyspace_migration_status {
+        sstring keyspace;
+        sstring status; // "vnodes", "migrating_to_tablets", or "tablets"
+        std::vector<node_migration_status> nodes;
+    };
+
+    future<keyspace_migration_status> get_tablets_migration_status(const sstring& ks_name);
     future<> set_node_intended_storage_mode(intended_storage_mode mode);
     future<> finalize_tablets_migration(const sstring& ks_name);
 

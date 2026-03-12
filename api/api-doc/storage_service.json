@@ -3184,6 +3184,23 @@
                      "paramType":"path"
                  }
              ]
+         },
+         {
+             "method":"GET",
+             "summary":"Get a keyspace's vnodes-to-tablets migration status",
+             "type":"vnode_tablet_migration_status",
+             "nickname":"get_vnode_tablet_migration",
+             "produces":["application/json"],
+             "parameters":[
+                 {
+                     "name":"keyspace",
+                     "description":"Keyspace name",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"path"
+                 }
+             ]
          }]
       },
       {
@@ -3841,6 +3858,45 @@
             "ratio":{
                "type":"float",
                "description":"The resulting compression ratio (estimated on a random sample of files)"
+            }
+         }
+      },
+      "vnode_tablet_migration_node_status":{
+         "id":"vnode_tablet_migration_node_status",
+         "description":"Node storage mode info during vnodes-to-tablets migration",
+         "properties":{
+            "host_id":{
+               "type":"string",
+               "description":"The host ID"
+            },
+            "current_mode":{
+               "type":"string",
+               "description":"The current storage mode: `vnodes` or `tablets`"
+            },
+            "intended_mode":{
+               "type":"string",
+               "description":"The intended storage mode: `vnodes` or `tablets`"
+            }
+         }
+      },
+      "vnode_tablet_migration_status":{
+         "id":"vnode_tablet_migration_status",
+         "description":"Vnodes-to-tablets migration status for a keyspace",
+         "properties":{
+            "keyspace":{
+               "type":"string",
+               "description":"The keyspace name"
+            },
+            "status":{
+               "type":"string",
+               "description":"The migration status: `vnodes` (not started), `migrating_to_tablets` (in progress), or `tablets` (complete)"
+            },
+            "nodes":{
+               "type":"array",
+               "items":{
+                  "$ref":"vnode_tablet_migration_node_status"
+               },
+               "description":"Per-node storage mode information. Empty if the keyspace is not being migrated."
             }
          }
       }

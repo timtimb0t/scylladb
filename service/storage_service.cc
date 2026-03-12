@@ -4199,6 +4199,82 @@ future<> storage_service::set_node_intended_storage_mode(intended_storage_mode m
     slogger.info("Successfully set intended storage mode for node {} to {}", raft_server.id(), mode);
 }
 
+future<storage_service::keyspace_migration_status> storage_service::get_tablets_migration_status(const sstring& ks_name) {
+    if (this_shard_id() != 0) {
+        co_return co_await container().invoke_on(0, [&ks_name] (auto& ss) {
+            return ss.get_tablets_migration_status(ks_name);
+        });
+    }
+
+    auto& db = _db.local();
+    auto& ks = db.find_keyspace(ks_name);
+
+    keyspace_migration_status result;
+    result.keyspace = ks_name;
+
+    if (ks.uses_tablets()) {
+        result.status = "tablets";
+        co_return result;
+    }
+
+    const auto& tm = get_token_metadata();
+    const auto& tablet_metadata = tm.tablets();
+
+    auto tables = ks.metadata()->tables();
+
+    // Check whether all tables have tablet maps (i.e. migration was started).
+    bool has_tablet_maps = !tables.empty() && std::ranges::all_of(tables, [&] (const auto& schema) {
+        return tablet_metadata.has_tablet_map(schema->id());
+    });
+
+    if (!has_tablet_maps) {
+        result.status = "vnodes";
+        co_return result;
+    }
+
+    result.status = "migrating_to_tablets";
+
+    // Pick one table and query system.tablet_sizes to find which nodes
+    // report tablet sizes (i.e. have loaded tablet-based ERMs).
+    auto sample_table_id = tables.front()->id();
+
+    // FIXME: system.tablet_sizes might return stale data (load stats in the topology coordinator are cached).
+    auto rs = co_await _qp.execute_internal(
+            "SELECT replicas FROM system.tablet_sizes WHERE table_id = ?",
+            {sample_table_id.uuid()},
+            cql3::query_processor::cache_internal::no);
+
+    // Collect all host_ids that appear in the replicas map across all tablets.
+    std::unordered_set<locator::host_id> nodes_reporting_tablets;
+    for (const auto& row : *rs) {
+        if (row.has("replicas")) {
+            auto replicas_map = row.get_map<utils::UUID, int64_t>("replicas");
+            for (const auto& [host_uuid, size] : replicas_map) {
+                nodes_reporting_tablets.insert(locator::host_id(host_uuid));
+            }
+        }
+    }
+
+    const auto& topo = _topology_state_machine._topology;
+    for (const auto& [server_id, rs] : topo.normal_nodes) {
+        auto host_id = locator::host_id{server_id.uuid()};
+        bool reports_tablets = nodes_reporting_tablets.contains(host_id);
+
+        auto current_mode = reports_tablets
+            ? intended_storage_mode::tablets
+            : intended_storage_mode::vnodes;
+        auto intended_mode = rs.storage_mode.value_or(intended_storage_mode::vnodes);
+
+        result.nodes.push_back(node_migration_status{
+            .host_id = host_id,
+            .current_mode = fmt::format("{}", current_mode),
+            .intended_mode = fmt::format("{}", intended_mode),
+        });
+    }
+
+    co_return result;
+}
+
 future<> storage_service::finalize_tablets_migration(const sstring& ks_name) {
     if (this_shard_id() != 0) {
         co_return co_await container().invoke_on(0, [&ks_name] (auto& ss) {
