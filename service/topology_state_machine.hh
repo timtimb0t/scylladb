@@ -88,6 +88,7 @@ enum class global_topology_request: uint16_t {
     // Ensures that all later requests and tablet scheduler will see prior updates to group0.
     noop_request,
     snapshot_tables,
+    finalize_migration,
 };
 
 struct ring_slice {

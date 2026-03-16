@@ -1169,6 +1169,164 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             co_await update_topology_state(std::move(guard), {builder.build()}, "SNAPSHOT TABLES requested");
         }
         break;
+        case global_topology_request::finalize_migration: {
+            rtlogger.info("finalize_migration requested");
+
+            auto ks_name = *req_entry.finalize_migration_ks_name;
+            utils::chunked_vector<canonical_mutation> updates;
+            sstring error;
+
+            if (_db.has_keyspace(ks_name)) {
+                try {
+                    auto& ks = _db.find_keyspace(ks_name);
+                    if (ks.uses_tablets()) {
+                        throw std::runtime_error(fmt::format("Keyspace '{}' already uses tablets", ks_name));
+                    }
+
+                    auto tmptr = get_token_metadata_ptr();
+                    const auto& tablet_metadata = tmptr->tablets();
+                    auto tables = ks.metadata()->tables();
+
+                    // Verify all tables have tablet maps.
+                    for (const auto& schema : tables) {
+                        if (!tablet_metadata.has_tablet_map(schema->id())) {
+                            throw std::runtime_error(fmt::format(
+                                "Table {}.{} does not have a tablet map", ks_name, schema->cf_name()));
+                        }
+                    }
+
+                    // Find the migration direction (tablets or rollback to vnodes).
+                    // Nodes that haven't set their intended mode are treated as vnodes (the default).
+                    std::optional<intended_storage_mode> global_intended_mode;
+                    for (const auto& [server_id, replica_state] : _topo_sm._topology.normal_nodes) {
+                        auto replica_intended_mode = replica_state.storage_mode ? *replica_state.storage_mode : intended_storage_mode::vnodes;
+                        if (!global_intended_mode) {
+                            global_intended_mode = replica_intended_mode;
+                        } else if (replica_intended_mode != *global_intended_mode) {
+                            throw std::runtime_error(fmt::format(
+                                "Cannot finalize migration for keyspace '{}': node {} has intended storage mode '{}', expected '{}'",
+                                ks_name, server_id, replica_intended_mode, *global_intended_mode));
+                        }
+                    }
+                    if (!global_intended_mode) {
+                        on_internal_error(rtlogger, fmt::format(
+                            "finalize_migration: no normal nodes found while finalizing migration for keyspace '{}'", ks_name));
+                    }
+                    bool rollback = *global_intended_mode == intended_storage_mode::vnodes;
+
+                    rtlogger.info("Finalizing migration for keyspace '{}': direction={}",
+                        ks_name, rollback ? "rollback to vnodes" : "forward to tablets");
+
+                    co_await _tablet_load_stats_refresh.trigger();
+
+                    // Verify that the actual storage mode matches the intended mode for all normal nodes.
+                    // A node that has migrated a table's storage to tablets will report it in its load_stats.
+                    for (const auto& [node_id, _] : _topo_sm._topology.normal_nodes) {
+                        auto host_id = to_host_id(node_id);
+                        auto it = _load_stats_per_node.find(host_id);
+                        if (!rollback) { // forward path (vnodes to tablets)
+                            if (it == _load_stats_per_node.end()) {
+                                throw std::runtime_error(fmt::format(
+                                    "No load stats available for node {}", host_id));
+                            }
+                            const auto& node_stats = it->second;
+                            for (const auto& schema : tables) {
+                                if (!node_stats.tables.contains(schema->id())) {
+                                    throw std::runtime_error(fmt::format(
+                                        "Node {} has not yet migrated table {}.{} to tablets",
+                                        host_id, ks_name, schema->cf_name()));
+                                }
+                            }
+                        } else { // rollback path (tablets to vnodes)
+                            if (it != _load_stats_per_node.end()) {
+                                const auto& node_stats = it->second;
+                                for (const auto& schema : tables) {
+                                    if (node_stats.tables.contains(schema->id())) {
+                                        throw std::runtime_error(fmt::format(
+                                            "Node {} still reports table {}.{} as tablet-based, rollback not complete",
+                                            host_id, ks_name, schema->cf_name()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!rollback) {
+                        // All nodes have been migrated. ALTER the keyspace to use tablets.
+                        auto old_md = ks.metadata();
+                        auto new_md = data_dictionary::keyspace_metadata::new_keyspace(
+                            old_md->name(),
+                            old_md->strategy_name(),
+                            old_md->strategy_options(),
+                            std::optional<unsigned>(0), // initial_tablets=0 means auto
+                            old_md->consistency_option(),
+                            old_md->durable_writes(),
+                            old_md->get_storage_options());
+                        auto schema_muts = prepare_keyspace_update_announcement(_db, new_md, guard.write_timestamp());
+                        for (auto& m : schema_muts) {
+                            updates.emplace_back(m);
+                        }
+                    } else {
+                        // Rollback: delete tablet maps for all tables in the keyspace.
+                        for (const auto& schema : tables) {
+                            updates.emplace_back(replica::make_drop_tablet_map_mutation(schema->id(), guard.write_timestamp()));
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    error = e.what();
+                    rtlogger.error("Couldn't process global_topology_request::finalize_migration for keyspace '{}': {}",
+                                   ks_name, std::current_exception());
+                    updates.clear();
+                }
+            } else {
+                error = fmt::format("Keyspace '{}' does not exist", ks_name);
+            }
+
+            topology_mutation_builder tbuilder(guard.write_timestamp());
+            tbuilder.del_global_topology_request()
+                    .del_global_topology_request_id()
+                    .drop_first_global_topology_request_id(_topo_sm._topology.global_requests_queue, req_id);
+
+            if (error.empty()) {
+                // Only clear intended_storage_mode if no other keyspace is still under migration.
+                auto tmptr = get_token_metadata_ptr();
+                const auto& tmd = tmptr->tablets();
+                bool has_other_migrating_ks = false;
+                for (const auto& other_ks_name : _db.get_non_system_keyspaces()) {
+                    if (other_ks_name == ks_name) {
+                        continue;
+                    }
+                    auto& other_ks = _db.find_keyspace(other_ks_name);
+                    if (other_ks.uses_tablets()) {
+                        continue;
+                    }
+                    bool other_ks_has_tablet_map = std::ranges::any_of(other_ks.metadata()->tables(), [&](const auto& s) {
+                        return tmd.has_tablet_map(s->id());
+                    });
+                    if (other_ks_has_tablet_map) {
+                        has_other_migrating_ks = true;
+                        break;
+                    }
+                }
+                if (!has_other_migrating_ks) {
+                    for (const auto& [node_id, _] : _topo_sm._topology.normal_nodes) {
+                        tbuilder.with_node(node_id).del("intended_storage_mode");
+                    }
+                }
+            }
+
+            updates.push_back(canonical_mutation(
+                    topology_request_tracking_mutation_builder(req_id)
+                         .done(error)
+                         .build()));
+            updates.push_back(canonical_mutation(tbuilder.build()));
+
+            sstring reason = fmt::format("finalize vnode-to-tablet migration for keyspace '{}'", ks_name);
+            mixed_change change{std::move(updates)};
+            group0_command g0_cmd = _group0.client().prepare_command(std::move(change), guard, reason);
+            co_await _group0.client().add_entry(std::move(g0_cmd), std::move(guard), _as);
+        }
+        break;
         }
     }
 

@@ -324,6 +324,7 @@ schema_ptr system_keyspace::topology_requests() {
             .with_column("snapshot_tag", utf8_type)
             .with_column("snapshot_expiry", timestamp_type)
             .with_column("snapshot_skip_flush", boolean_type)
+            .with_column("finalize_migration_ks_name", utf8_type)
             .set_comment("Topology request tracking")
             .with_hash_version()
             .build();
@@ -3511,6 +3512,9 @@ system_keyspace::topology_requests_entry system_keyspace::topology_request_row_t
         if (row.has("snapshot_expiry")) {
             entry.snapshot_expiry = row.get_as<db_clock::time_point>("snapshot_expiry");
         }
+    }
+    if (row.has("finalize_migration_ks_name")) {
+        entry.finalize_migration_ks_name = row.get_as<sstring>("finalize_migration_ks_name");
     }
 
     return entry;
