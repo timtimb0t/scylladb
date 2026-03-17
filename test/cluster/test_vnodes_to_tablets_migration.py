@@ -272,6 +272,126 @@ async def test_migration(manager: ManagerClient):
 
 
 @pytest.mark.asyncio
+async def test_migration_rollback(manager: ManagerClient):
+    """Verify rollback of vnodes-to-tablets migration on a single-node cluster.
+
+    Same as test_migration(), but after the first restart (which reshards on
+    vnode boundaries), the node is marked for downgrade back to vnodes and
+    restarted again. After finalization the keyspace must still use vnodes, and
+    the group0 state (tablet map, intended_storage_mode) must have been
+    cleared.
+
+    Steps:
+    1. Start a single node with multiple shards and power-of-2 aligned vnodes.
+    2. Create a vnode table and inject data.
+    3. Start the migration by creating a tablet map for the table.
+    4. Mark the node for upgrade and restart (triggers resharding).
+    5. Mark the node for downgrade back to vnodes and restart again.
+    6. Finalize the migration.
+       - Verify that the keyspace schema still uses vnodes.
+       - Verify that the tablet map has been cleared.
+       - Verify that intended_storage_mode is cleared.
+       - Verify data integrity.
+    """
+    num_shards = 3
+    tokens_per_node = 16
+    num_keys = 5000
+
+    logger.info(f"Starting a node with {num_shards} shards and {tokens_per_node} power-of-2 aligned tokens")
+    tokens = calculate_powof2_tokens(num_nodes=1, tokens_per_node=tokens_per_node)
+    token_list = tokens[1]  # server_id 1
+    initial_token = ','.join([str(t) for t in token_list])
+    servers = (await manager.servers_add(1, cmdline=['--smp', str(num_shards), '--initial-token', initial_token, '--logger-log-level', 'compaction=debug']))
+    server = servers[0]
+    host_id = await manager.get_host_id(server.server_id)
+
+    cql, _ = await manager.get_ready_cql(servers)
+
+    logger.info("Creating keyspace and table with vnodes")
+    async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}} AND tablets = {{'enabled': false}}") as ks:
+        await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, c int) WITH compaction = {{'class': 'IncrementalCompactionStrategy', 'enabled': false}}")
+
+        logger.info("Populating table in batches, flushing after each batch to produce multiple SSTables")
+        stmt = cql.prepare(f"INSERT INTO {ks}.test (pk, c) VALUES (?, ?)")
+        num_flushes = 5
+        keys_per_sstable = num_keys // num_flushes
+        for batch_start in range(0, num_keys, keys_per_sstable):
+            batch_end = min(batch_start + keys_per_sstable, num_keys)
+            await asyncio.gather(*(cql.run_async(stmt, [k, k]) for k in range(batch_start, batch_end)))
+            await manager.api.keyspace_flush(server.ip_addr, ks, "test")
+
+        logger.info("Starting vnodes-to-tablets migration (creating a tablet map)")
+        await manager.api.create_vnode_tablet_migration(server.ip_addr, ks)
+
+        logger.info("Verifying that the tablet map was created")
+        tablet_count = await get_tablet_count(manager, server, ks, 'test')
+        assert tablet_count == tokens_per_node, \
+            f"Expected {tokens_per_node} tablet(s), got {tablet_count}"
+
+        logger.info("Marking node for tablets migration")
+        await manager.api.upgrade_node_to_tablets(server.ip_addr)
+
+        logger.info("Restarting the node to trigger resharding")
+        await manager.server_restart(server.server_id)
+        await reconnect_driver(manager)
+        cql, _ = await manager.get_ready_cql(servers)
+
+        logger.info("Verifying data integrity after first restart")
+        await verify_data_integrity(cql, ks, "test", num_keys)
+
+        logger.info("Verifying migration status after first restart (node should now use tablets)")
+        await verify_migration_status(manager, server, ks,
+            expected_status='migrating_to_tablets',
+            expected_node_statuses={host_id: ('tablets', 'tablets')})
+
+        logger.info("Marking node for downgrade back to vnodes")
+        await manager.api.downgrade_node_to_vnodes(server.ip_addr)
+
+        logger.info("Verifying migration status after marking node for downgrade")
+        await verify_migration_status(manager, server, ks,
+            expected_status='migrating_to_tablets',
+            expected_node_statuses={host_id: ('tablets', 'vnodes')})
+
+        logger.info("Restarting the node to trigger resharding back to vnodes")
+        await manager.server_restart(server.server_id)
+        await reconnect_driver(manager)
+        cql, _ = await manager.get_ready_cql(servers)
+
+        logger.info("Verifying data integrity after second restart (downgrade)")
+        await verify_data_integrity(cql, ks, "test", num_keys)
+
+        logger.info("Verifying migration status after second restart (node should be back on vnodes)")
+        await verify_migration_status(manager, server, ks,
+            expected_status='migrating_to_tablets',
+            expected_node_statuses={host_id: ('vnodes', 'vnodes')})
+
+        logger.info("Finalizing migration (rollback path)")
+        await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks)
+
+        logger.info("Verifying that the keyspace schema still uses vnodes")
+        res = await cql.run_async(f"SELECT * FROM system_schema.scylla_keyspaces WHERE keyspace_name = '{ks}'")
+        assert len(res) == 0, \
+            f"Expected keyspace to still use vnodes after rollback"
+
+        logger.info("Verifying that the tablet map has been cleared")
+        tablet_count = await get_tablet_count(manager, server, ks, 'test')
+        assert tablet_count == 0, \
+            f"Expected 0 tablets after rollback, got {tablet_count}"
+
+        logger.info("Verifying that intended_storage_mode is cleared after finalization")
+        rows = await cql.run_async("SELECT host_id, intended_storage_mode FROM system.topology WHERE key = 'topology'")
+        for row in rows:
+            assert row.intended_storage_mode is None, \
+                f"Expected intended_storage_mode=None for node {row.host_id} after rollback finalization, got '{row.intended_storage_mode}'"
+
+        logger.info("Verifying migration status after rollback finalization")
+        await verify_migration_status(manager, server, ks, expected_status='vnodes', expected_node_statuses={})
+
+        logger.info("Final data integrity check")
+        await verify_data_integrity(cql, ks, "test", num_keys)
+
+
+@pytest.mark.asyncio
 async def test_migration_multinode(manager: ManagerClient):
     """Verify vnodes-to-tablets migration for a single table on a multi-node cluster with rolling restarts.
 
