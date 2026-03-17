@@ -16,6 +16,7 @@ import re
 
 from test.alternator.util import create_test_table, is_aws, scylla_log
 from test.cqlpy.conftest import host  # add required fixtures
+from test.pylib.driver_utils import safe_driver_shutdown
 from test.pylib.runner import testpy_test_fixture_scope
 from test.pylib.suite.python import add_host_option
 from urllib.parse import urlparse
@@ -455,4 +456,4 @@ def cql(dynamodb):
     except NoHostAvailable:
         pytest.skip('Could not connect to Scylla-only CQL API')
     yield ret
-    cluster.shutdown()
+    safe_driver_shutdown(cluster)
