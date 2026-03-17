@@ -14,6 +14,7 @@ from collections import defaultdict
 from cassandra.query import SimpleStatement, ConsistencyLevel
 
 from test.pylib.tablets import get_tablet_count, get_all_tablet_replicas
+from test.pylib.rest_client import read_barrier
 from test.pylib.internal_types import ServerInfo
 from test.pylib.manager_client import ManagerClient
 from test.cluster.util import new_test_keyspace, reconnect_driver
@@ -268,3 +269,146 @@ async def test_migration(manager: ManagerClient):
 
         logger.info("Verifying migration status after finalization")
         await verify_migration_status(manager, server, ks, expected_status='tablets', expected_node_statuses={})
+
+
+@pytest.mark.asyncio
+async def test_migration_multinode(manager: ManagerClient):
+    """Verify vnodes-to-tablets migration for a single table on a multi-node cluster with rolling restarts.
+
+    Steps:
+    1. Start a 2-node cluster with RF=2, multiple shards, and power-of-2 aligned vnodes.
+    2. Create a vnode table and inject data at CL=QUORUM.
+    3. Create tablet map — verify one tablet replica per node, tablet tokens match vnode tokens.
+    4. Rolling restart — for each node: mark for upgrade, verify intended_storage_mode
+       in system.topology, restart, then verify reads/writes at CL=QUORUM from every node.
+    5. Finalize — verify keyspace schema has tablets enabled, intended_storage_mode is cleared
+       for all nodes.
+    """
+    num_nodes = 2
+    num_shards = 3
+    tokens_per_node = 64
+    num_keys = 1000
+
+    logger.info(f"Starting {num_nodes} nodes with {num_shards} shards each, ~{tokens_per_node} power-of-2 aligned tokens per node")
+    calculated_tokens = calculate_powof2_tokens(num_nodes=num_nodes, tokens_per_node=tokens_per_node)
+    total_vnodes = sum(len(t) for t in calculated_tokens.values())
+    logger.info(f"Total vnodes: {total_vnodes}")
+
+    servers = []
+    cfg = {'tablet_load_stats_refresh_interval_in_seconds': 1}
+    for i, tokens in calculated_tokens.items():
+        cmdline = [
+            '--smp', str(num_shards),
+            '--logger-log-level', 'compaction=debug',
+            f"--initial-token={','.join([str(t) for t in tokens])}",
+        ]
+        servers.append(await manager.server_add(cmdline=cmdline, property_file={"dc": "dc1", "rack": f"rack{i}"}, config=cfg))
+
+    cql, _ = await manager.get_ready_cql(servers)
+
+    server_to_host_map = {s.server_id: await manager.get_host_id(s.server_id) for s in servers}
+    host_ids = set(server_to_host_map.values())
+
+    logger.info(f"Creating keyspace and table with vnodes (RF={num_nodes})")
+    async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': {num_nodes}}} AND tablets = {{'enabled': false}}") as ks:
+        await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, c int)")
+
+        logger.info(f"Populating table with {num_keys} rows at CL=QUORUM")
+        insert_stmt = cql.prepare(f"INSERT INTO {ks}.test (pk, c) VALUES (?, ?)")
+        insert_stmt.consistency_level = ConsistencyLevel.QUORUM
+        await asyncio.gather(*(cql.run_async(insert_stmt, [k, k]) for k in range(num_keys)))
+
+        logger.info("Starting vnodes-to-tablets migration (creating tablet map)")
+        await manager.api.create_vnode_tablet_migration(servers[0].ip_addr, ks)
+
+        logger.info("Verifying migration status after creating tablet map")
+        await verify_migration_status(manager, servers[0], ks,
+            expected_status='migrating_to_tablets',
+            expected_node_statuses={host_id: ('vnodes', 'vnodes') for host_id in host_ids})
+
+        logger.info("Verifying tablet map")
+        tablet_replicas = await get_all_tablet_replicas(manager, servers[0], ks, 'test')
+        assert len(tablet_replicas) == total_vnodes, \
+            f"Expected {total_vnodes} tablets, got {len(tablet_replicas)}"
+
+        all_vnode_tokens = sorted([t for tokens in calculated_tokens.values() for t in tokens])
+        tablet_tokens = sorted([tr.last_token for tr in tablet_replicas])
+        assert tablet_tokens == all_vnode_tokens, \
+            f"Tablet tokens do not match vnode tokens"
+
+        for tr in tablet_replicas:
+            replica_hosts = set(r[0] for r in tr.replicas)
+            assert replica_hosts == host_ids, \
+                f"Tablet at token {tr.last_token}: replica hosts {replica_hosts} != expected {host_ids}"
+
+        logger.info("Verifying data integrity before rolling restart")
+        await verify_data_integrity(cql, ks, "test", num_keys)
+
+        logger.info("Starting rolling restarts: mark each node for upgrade, restart it, verify reads/writes at CL=QUORUM from every node")
+        for restart_idx, s in enumerate(servers):
+            logger.info(f"Marking node {s.server_id} for tablets migration")
+            await manager.api.upgrade_node_to_tablets(s.ip_addr)
+
+            logger.info(f"Verifying intended_storage_mode='tablets' on node {s.server_id}")
+            # It is important to verify the intended_storage_mode value on the
+            # local group0 copy of the node that is about to be restarted
+            # because the upgrade is an offline operation happening on startup,
+            # so the node's group0 copy must be up-to-date.
+            host_obj = cql.cluster.metadata.get_host(s.ip_addr)
+            node_host_id = server_to_host_map[s.server_id]
+            rows = await cql.run_async(f"SELECT intended_storage_mode FROM system.topology WHERE key = 'topology' AND host_id = {node_host_id}", host=host_obj)
+            assert len(rows) == 1, f"Expected 1 row for host_id {node_host_id}, got {len(rows)}"
+            assert rows[0].intended_storage_mode == "tablets", \
+                f"Expected intended_storage_mode='tablets' for node {s.server_id}, got '{rows[0].intended_storage_mode}'"
+
+            logger.info(f"Restarting node {s.server_id}")
+            await manager.server_restart(s.server_id)
+            await reconnect_driver(manager)
+            cql, _ = await manager.get_ready_cql(servers)
+
+            # Run 10 read/write queries from each node at CL=QUORUM to verify
+            # correctness. The cluster is in a semi-migrated state, so some
+            # nodes use a tablet ERM and some nodes use a vnode ERM.
+            logger.info(f"Running read/write verification from all nodes after restarting node {s.server_id}")
+            insert_stmt = cql.prepare(f"INSERT INTO {ks}.test (pk, c) VALUES (?, ?)")
+            insert_stmt.consistency_level = ConsistencyLevel.QUORUM
+            select_stmt = cql.prepare(f"SELECT c FROM {ks}.test WHERE pk = ?")
+            select_stmt.consistency_level = ConsistencyLevel.QUORUM
+            for node_idx, node in enumerate(servers):
+                host_obj = cql.cluster.metadata.get_host(node.ip_addr)
+                base_key = num_keys + restart_idx * num_nodes * 10 + node_idx * 10
+                for i in range(10):
+                    key = base_key + i
+                    await cql.run_async(insert_stmt, [key, key], host=host_obj)
+                    rows = await cql.run_async(select_stmt, [key], host=host_obj)
+                    assert len(rows) == 1 and rows[0].c == key, \
+                        f"Read/write verification failed: node {node.server_id}, key {key}"
+
+        logger.info("Verifying migration status after rolling restarts")
+        await verify_migration_status(manager, servers[0], ks,
+            expected_status='migrating_to_tablets',
+            expected_node_statuses={host_id: ('tablets', 'tablets') for host_id in host_ids},
+            retries=1, retry_interval=1) # the status is derived from the topology coordinator's load stats which are refreshed every second; give it one retry after 1 second
+
+        logger.info("Finalizing tablets migration")
+        await manager.api.finalize_vnode_tablet_migration(servers[0].ip_addr, ks)
+
+        # Barrier on an arbitrary node to ensure we can observe the latest group0 state from it.
+        await read_barrier(manager.api, servers[1].ip_addr)
+        host1 = cql.cluster.metadata.get_host(servers[1].ip_addr)
+
+        logger.info("Verifying that the keyspace schema has tablets enabled")
+        res = await cql.run_async(f"SELECT * FROM system_schema.scylla_keyspaces WHERE keyspace_name = '{ks}'", host=host1)
+        assert len(res) == 1 and res[0].initial_tablets is not None, \
+            "Keyspace is still using vnodes after migration finalization"
+
+        logger.info("Verifying intended_storage_mode is cleared for all nodes after finalization")
+        rows = await cql.run_async(f"SELECT host_id, intended_storage_mode FROM system.topology WHERE key = 'topology'", host=host1)
+        assert len(rows) == num_nodes, f"Expected {num_nodes} rows, got {len(rows)}"
+        for row in rows:
+            assert row.intended_storage_mode is None, \
+                f"Expected intended_storage_mode=None for node {row.host_id} after finalization, got '{row.intended_storage_mode}'"
+
+        logger.info("Final data integrity check")
+        total_keys = num_keys + num_nodes * num_nodes * 10 # original keys + 10 keys per node inserted during rolling restarts
+        await verify_data_integrity(cql, ks, "test", total_keys)
