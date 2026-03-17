@@ -6340,7 +6340,7 @@ SEASTAR_TEST_CASE(unsealed_sstable_compaction_test) {
         sst_cfg.leave_unsealed = true;
         auto unsealed_sstable = make_sstable_easy(env, make_mutation_reader_from_mutations(s, env.make_reader_permit(), std::move(mut)), sst_cfg);
 
-        BOOST_REQUIRE(file_exists(unsealed_sstable->get_filename(sstables::component_type::TemporaryTOC).format()).get());
+        BOOST_REQUIRE(unsealed_sstable->get_storage().exists(*unsealed_sstable, sstables::component_type::TemporaryTOC).get());
 
         auto sst_gen = env.make_sst_factory(s);
         auto info = compact_sstables(env, compaction::compaction_descriptor({ unsealed_sstable }), t, sst_gen).get();
@@ -6368,16 +6368,16 @@ SEASTAR_TEST_CASE(sstable_clone_leaving_unsealed_dest_sstable) {
 
         auto sst2 = env.make_sstable(s, d.generation, d.version, d.format);
         sst2->load(s->get_sharder(), sstable_open_config{ .unsealed_sstable = leave_unsealed }).get();
-        BOOST_REQUIRE(!file_exists(sst2->get_filename(sstables::component_type::TOC).format()).get());
-        BOOST_REQUIRE(file_exists(sst2->get_filename(sstables::component_type::TemporaryTOC).format()).get());
+        BOOST_REQUIRE(!sst2->get_storage().exists(*sst2, sstables::component_type::TOC).get());
+        BOOST_REQUIRE(sst2->get_storage().exists(*sst2, sstables::component_type::TemporaryTOC).get());
 
         leave_unsealed = false;
         d = sst->clone(gen_generator(), leave_unsealed).get();
 
         auto sst3 = env.make_sstable(s, d.generation, d.version, d.format);
         sst3->load(s->get_sharder(), sstable_open_config{ .unsealed_sstable = leave_unsealed }).get();
-        BOOST_REQUIRE(file_exists(sst3->get_filename(sstables::component_type::TOC).format()).get());
-        BOOST_REQUIRE(!file_exists(sst3->get_filename(sstables::component_type::TemporaryTOC).format()).get());
+        BOOST_REQUIRE(sst3->get_storage().exists(*sst3, sstables::component_type::TOC).get());
+        BOOST_REQUIRE(!sst3->get_storage().exists(*sst3, sstables::component_type::TemporaryTOC).get());
     });
 }
 
@@ -6398,15 +6398,15 @@ SEASTAR_TEST_CASE(failure_when_adding_new_sstable_test) {
         BOOST_REQUIRE_THROW(table->add_new_sstable_and_update_cache(sst, on_add).get(), std::runtime_error);
 
         // Verify new sstable was unlinked on failure.
-        BOOST_REQUIRE(!file_exists(sst->get_filename(sstables::component_type::Data).format()).get());
+        BOOST_REQUIRE(!sst->get_storage().exists(*sst, sstables::component_type::Data).get());
 
         auto sst2 = make_sstable_containing(env.make_sstable(s), {mut1});
         auto sst3 = make_sstable_containing(env.make_sstable(s), {mut1});
         BOOST_REQUIRE_THROW(table->add_new_sstables_and_update_cache({sst2, sst3}, on_add).get(), std::runtime_error);
 
         // Verify both sstables are unlinked on failure.
-        BOOST_REQUIRE(!file_exists(sst2->get_filename(sstables::component_type::Data).format()).get());
-        BOOST_REQUIRE(!file_exists(sst3->get_filename(sstables::component_type::Data).format()).get());
+        BOOST_REQUIRE(!sst2->get_storage().exists(*sst2, sstables::component_type::Data).get());
+        BOOST_REQUIRE(!sst3->get_storage().exists(*sst3, sstables::component_type::Data).get());
     });
 }
 
