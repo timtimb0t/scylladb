@@ -158,13 +158,15 @@ static void assert_table_sstable_count(table_for_tests& t, size_t expected_count
 }
 
 static void corrupt_sstable(sstables::shared_sstable sst, component_type type = component_type::Data) {
-    auto f = open_file_dma(sstables::test(sst).filename(type).native(), open_flags::wo).get();
+    auto f = sstables::test(sst).open_file(type, {}, {}).get();
     auto close_f = deferred_close(f);
     const auto wbuf_align = f.memory_dma_alignment();
-    const auto wbuf_len = f.disk_write_dma_alignment();
+    const auto wbuf_len = f.size().get();
     auto wbuf = seastar::temporary_buffer<char>::aligned(wbuf_align, wbuf_len);
     std::fill(wbuf.get_write(), wbuf.get_write() + wbuf_len, 0xba);
-    f.dma_write(0, wbuf.get(), wbuf_len).get();
+    auto os = output_stream<char>(sstables::test(sst).get_storage().make_component_sink(*sst, component_type::Data, open_flags::wo, {}).get());
+    auto close_os = deferred_close(os);
+    os.write(std::move(wbuf)).get();
 }
 
 SEASTAR_TEST_CASE(compaction_manager_basic_test) {
@@ -562,13 +564,15 @@ static void compact_corrupted_by_compression_mode(const std::string& tname,
 
         sst = make_sstable_containing(env.make_sstable(schema), muts);
         {
-            auto f = open_file_dma(sstables::test(sst).filename(component_type::Digest).native(), open_flags::rw).get();
+            auto f = sstables::test(sst).open_file(component_type::Digest, {}, {}).get();
             auto stream = make_file_input_stream(f);
             auto close_stream = deferred_close(stream);
             auto digest_str = util::read_entire_stream_contiguous(stream).get();
             auto digest = boost::lexical_cast<uint32_t>(digest_str);
             auto new_digest = to_sstring<bytes>(digest + 1); // a random invalid digest
-            f.dma_write(0, new_digest.c_str(), new_digest.size()).get();
+            auto os = output_stream<char>(sstables::test(sst).get_storage().make_component_sink(*sst, component_type::Digest, open_flags::wo | open_flags::truncate, {}).get());
+            auto close_os = deferred_close(os);
+            os.write(std::move(new_digest)).get();
         }
         test_failing_compact(schema, {sst}, error_msg, "Digest mismatch");
     }).get();
@@ -2535,13 +2539,16 @@ void scrub_validate_corrupted_digest(compress_sstable compress) {
         // This test is about corrupted data with valid per-chunk checksums.
         // This kind of corruption should be detected by the digest check.
         // Triggering this is not trivial, so we corrupt the Digest file instead.
-        auto f = open_file_dma(sstables::test(sst).filename(component_type::Digest).native(), open_flags::rw).get();
+        auto f = sstables::test(sst).open_file(component_type::Digest, {}, {}).get();
         auto stream = make_file_input_stream(f);
         auto close_stream = deferred_close(stream);
         auto digest_str = util::read_entire_stream_contiguous(stream).get();
         auto digest = boost::lexical_cast<uint32_t>(digest_str);
         auto new_digest = to_sstring<bytes>(digest + 1); // a random invalid digest
-        f.dma_write(0, new_digest.c_str(), new_digest.size()).get();
+        auto os = output_stream<char>(sstables::test(sst).get_storage().make_component_sink(*sst, component_type::Digest, open_flags::wo, {}).get());
+        auto close_os = deferred_close(os);
+        os.write(std::move(new_digest)).get();
+        os.flush().get();
 
         compaction::compaction_type_options::scrub opts = {
             .operation_mode = compaction::compaction_type_options::scrub::mode::validate,
