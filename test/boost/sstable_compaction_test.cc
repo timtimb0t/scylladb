@@ -508,7 +508,7 @@ SEASTAR_TEST_CASE(compact_02) {
 template <typename ExceptionType>
 static void compact_corrupted_by_compression_mode(const std::string& tname,
         compress_sstable compress,
-        compaction::compaction_type_options&& options,
+        compaction::compaction_type_options options,
         const sstring& error_msg)
 {
     test_env::do_with_async([&] (test_env& env) {
@@ -577,7 +577,7 @@ static void compact_corrupted_by_compression_mode(const std::string& tname,
 template <typename ExceptionType>
 static void compact_corrupted(const std::string& tname, compaction::compaction_type_options&& options, const sstring& error_msg) {
     for (const auto& compress : {compress_sstable::no, compress_sstable::yes}) {
-        compact_corrupted_by_compression_mode<ExceptionType>(tname, compress, std::move(options), error_msg);
+        compact_corrupted_by_compression_mode<ExceptionType>(tname, compress, options, error_msg);
     }
 }
 
