@@ -665,7 +665,8 @@ static bool sstable_overlaps(const lw_shared_ptr<replica::column_family>& cf, ss
 SEASTAR_TEST_CASE(leveled_01) {
   BOOST_REQUIRE_EQUAL(smp::count, 1);
   return test_env::do_with_async([] (test_env& env) {
-    auto cf = env.make_table_for_tests();
+    auto schema = table_for_tests::make_default_schema();
+    auto cf = env.make_table_for_tests(schema);
     auto stop_cf = deferred_stop(cf);
 
     const auto keys = tests::generate_partition_keys(50, cf.schema());
@@ -706,7 +707,8 @@ SEASTAR_TEST_CASE(leveled_01) {
 SEASTAR_TEST_CASE(leveled_02) {
   BOOST_REQUIRE_EQUAL(smp::count, 1);
   return test_env::do_with_async([] (test_env& env) {
-    auto cf = env.make_table_for_tests();
+    auto schema = table_for_tests::make_default_schema();
+    auto cf = env.make_table_for_tests(schema);
     auto stop_cf = deferred_stop(cf);
 
     const auto keys = tests::generate_partition_keys(50, cf.schema());
@@ -757,7 +759,8 @@ SEASTAR_TEST_CASE(leveled_02) {
 SEASTAR_TEST_CASE(leveled_03) {
   BOOST_REQUIRE_EQUAL(smp::count, 1);
   return test_env::do_with_async([] (test_env& env) {
-    auto cf = env.make_table_for_tests();
+    auto schema = table_for_tests::make_default_schema();
+    auto cf = env.make_table_for_tests(schema);
     auto stop_cf = deferred_stop(cf);
 
     const auto keys = tests::generate_partition_keys(50, cf.schema());
@@ -809,7 +812,8 @@ SEASTAR_TEST_CASE(leveled_03) {
 SEASTAR_TEST_CASE(leveled_04) {
   BOOST_REQUIRE_EQUAL(smp::count, 1);
   return test_env::do_with_async([] (test_env& env) {
-    auto cf = env.make_table_for_tests();
+    auto schema = table_for_tests::make_default_schema();
+    auto cf = env.make_table_for_tests(schema);
     auto stop_cf = deferred_stop(cf);
 
     const auto keys = tests::generate_partition_keys(50, cf.schema());
@@ -888,7 +892,8 @@ SEASTAR_TEST_CASE(leveled_05) {
 SEASTAR_TEST_CASE(leveled_06) {
     // Test that we can compact a single L1 compaction into an empty L2.
   return test_env::do_with_async([] (test_env& env) {
-    auto cf = env.make_table_for_tests();
+    auto schema = table_for_tests::make_default_schema();
+    auto cf = env.make_table_for_tests(schema);
     auto stop_cf = deferred_stop(cf);
 
     auto max_sstable_size_in_mb = 1;
@@ -920,7 +925,8 @@ SEASTAR_TEST_CASE(leveled_06) {
 
 SEASTAR_TEST_CASE(leveled_07) {
   return test_env::do_with_async([] (test_env& env) {
-    auto cf = env.make_table_for_tests();
+    auto schema = table_for_tests::make_default_schema();
+    auto cf = env.make_table_for_tests(schema);
     auto stop_cf = deferred_stop(cf);
 
     const auto key = tests::generate_partition_key(cf.schema());
@@ -944,7 +950,8 @@ SEASTAR_TEST_CASE(leveled_07) {
 
 SEASTAR_TEST_CASE(leveled_invariant_fix) {
   return test_env::do_with_async([] (test_env& env) {
-    auto cf = env.make_table_for_tests();
+    auto schema = table_for_tests::make_default_schema();
+    auto cf = env.make_table_for_tests(schema);
     auto stop_cf = deferred_stop(cf);
 
     auto sstables_no = cf.schema()->max_compaction_threshold();
@@ -1032,7 +1039,8 @@ SEASTAR_TEST_CASE(leveled_stcs_on_L0) {
 
 SEASTAR_TEST_CASE(overlapping_starved_sstables_test) {
   return test_env::do_with_async([] (test_env& env) {
-    auto cf = env.make_table_for_tests();
+    auto schema = table_for_tests::make_default_schema();
+    auto cf = env.make_table_for_tests(schema);
     auto stop_cf = deferred_stop(cf);
 
     const auto keys = tests::generate_partition_keys(5, cf.schema());
@@ -1064,7 +1072,8 @@ SEASTAR_TEST_CASE(overlapping_starved_sstables_test) {
 
 SEASTAR_TEST_CASE(check_overlapping) {
   return test_env::do_with_async([] (test_env& env) {
-    auto cf = env.make_table_for_tests();
+    auto schema = table_for_tests::make_default_schema();
+    auto cf = env.make_table_for_tests(schema);
     auto stop_cf = deferred_stop(cf);
 
     const auto keys = tests::generate_partition_keys(4, cf.schema());
@@ -1590,8 +1599,9 @@ SEASTAR_TEST_CASE(get_fully_expired_sstables_test) {
     auto t3 = gc_clock::from_time_t(20).time_since_epoch().count();
     auto t4 = gc_clock::from_time_t(30).time_since_epoch().count();
 
+    auto schema = table_for_tests::make_default_schema();
     {
-        auto cf = env.make_table_for_tests();
+        auto cf = env.make_table_for_tests(schema);
         auto close_cf = deferred_stop(cf);
 
         auto sst1 = add_sstable_for_overlapping_test(env, cf, min_key.key(), keys[1].key(), build_stats(t0, t1, t1));
@@ -1603,7 +1613,7 @@ SEASTAR_TEST_CASE(get_fully_expired_sstables_test) {
     }
 
     {
-        auto cf = env.make_table_for_tests();
+        auto cf = env.make_table_for_tests(schema);
         auto close_cf = deferred_stop(cf);
 
         auto sst1 = add_sstable_for_overlapping_test(env, cf, min_key.key(), keys[1].key(), build_stats(t0, t1, t1));
@@ -1959,7 +1969,8 @@ SEASTAR_TEST_CASE(min_max_clustering_key_test_2) {
 
 SEASTAR_TEST_CASE(size_tiered_beyond_max_threshold_test) {
   return test_env::do_with_async([] (test_env& env) {
-    auto cf = env.make_table_for_tests();
+    auto schema = table_for_tests::make_default_schema();
+    auto cf = env.make_table_for_tests(schema);
     auto stop_cf = deferred_stop(cf);
     auto cs = compaction::make_compaction_strategy(compaction::compaction_strategy_type::size_tiered, cf.schema()->compaction_strategy_options());
 
@@ -3711,7 +3722,7 @@ SEASTAR_TEST_CASE(compaction_strategy_aware_major_compaction_test) {
         sst2->set_sstable_level(3);
         auto candidates = std::vector<sstables::shared_sstable>({ sst, sst2 });
 
-        auto cf = env.make_table_for_tests();
+        auto cf = env.make_table_for_tests(s);
         auto close_cf = deferred_stop(cf);
 
         {
@@ -5244,7 +5255,8 @@ SEASTAR_TEST_CASE(basic_ics_controller_correctness_test) {
         auto s = simple_schema().schema();
 
         auto backlog = [&] (compaction::compaction_backlog_tracker backlog_tracker, uint64_t max_fragment_size) {
-            table_for_tests cf = env.make_table_for_tests();
+            auto schema = table_for_tests::make_default_schema();
+            table_for_tests cf = env.make_table_for_tests(schema);
             auto stop_cf = defer([&] { cf.stop().get(); });
 
             uint64_t current_sstable_size = default_fragment_size;
