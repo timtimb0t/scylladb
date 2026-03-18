@@ -892,7 +892,6 @@ class ScyllaServer:
                                 return
                         await report_error("the node startup failed, but the log file doesn't contain the expected error")
                 await report_error("failed to start the node")
-            self.logger.info("Wait me %s expect %s is %s", self.server_id, expected_server_up_state, server_up_state)
             if await self.try_get_host_id(api):
                 if server_up_state == ServerUpState.PROCESS_STARTED:
                     server_up_state = ServerUpState.HOST_ID_QUERIED
