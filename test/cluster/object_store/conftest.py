@@ -199,7 +199,7 @@ class GSServer(GSFront):
 
     def unpublish(self):
         for k in self.vars:
-            v = self.oldvars[k]
+            v = self.oldvars.get(k)
             if v:
                 os.environ[k] = v
             elif os.environ.get(k):
