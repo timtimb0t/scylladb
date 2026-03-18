@@ -14,7 +14,7 @@ from collections import defaultdict
 from cassandra.query import SimpleStatement, ConsistencyLevel
 
 from test.pylib.tablets import get_tablet_count, get_all_tablet_replicas
-from test.pylib.rest_client import read_barrier
+from test.pylib.rest_client import HTTPError, read_barrier
 from test.pylib.internal_types import ServerInfo
 from test.pylib.manager_client import ManagerClient
 from test.cluster.util import new_test_keyspace, reconnect_driver
@@ -532,3 +532,107 @@ async def test_migration_multinode(manager: ManagerClient):
         logger.info("Final data integrity check")
         total_keys = num_keys + num_nodes * num_nodes * 10 # original keys + 10 keys per node inserted during rolling restarts
         await verify_data_integrity(cql, ks, "test", total_keys)
+
+
+async def setup_single_node_with_powof2_tokens(manager: ManagerClient):
+    """Start a single node with power-of-2 aligned tokens for migration error tests."""
+    tokens_per_node = 16
+    tokens = calculate_powof2_tokens(num_nodes=1, tokens_per_node=tokens_per_node)
+    token_list = tokens[1]
+    initial_token = ','.join([str(t) for t in token_list])
+    server = await manager.server_add(cmdline=['--smp', '2', '--initial-token', initial_token])
+    cql, _ = await manager.get_ready_cql([server])
+    return server, cql
+
+
+@pytest.mark.asyncio
+async def test_migration_nonexistent_keyspace(manager: ManagerClient):
+    """Verify that migration APIs fail on a non-existent keyspace."""
+    server, cql = await setup_single_node_with_powof2_tokens(manager)
+
+    with pytest.raises(HTTPError, match="Can't find a keyspace"):
+        await manager.api.create_vnode_tablet_migration(server.ip_addr, "ks")
+    with pytest.raises(HTTPError, match="Can't find a keyspace"):
+        await manager.api.get_vnode_tablet_migration_status(server.ip_addr, "ks")
+    with pytest.raises(HTTPError, match="Can't find a keyspace"):
+        await manager.api.finalize_vnode_tablet_migration(server.ip_addr, "ks")
+
+
+@pytest.mark.asyncio
+async def test_migration_already_tablets(manager: ManagerClient):
+    """Verify that starting migration on a keyspace that already uses tablets fails."""
+    server, cql = await setup_single_node_with_powof2_tokens(manager)
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}") as ks_tablets:
+        with pytest.raises(HTTPError, match="already uses tablets"):
+            await manager.api.create_vnode_tablet_migration(server.ip_addr, ks_tablets)
+
+
+@pytest.mark.asyncio
+async def test_migration_empty_keyspace(manager: ManagerClient):
+    """Verify that starting migration on a keyspace with no tables fails."""
+    server, cql = await setup_single_node_with_powof2_tokens(manager)
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks_empty:
+        with pytest.raises(HTTPError, match="has no tables to migrate"):
+            await manager.api.create_vnode_tablet_migration(server.ip_addr, ks_empty)
+
+
+@pytest.mark.asyncio
+async def test_migration_finalize_without_migration(manager: ManagerClient):
+    """Verify that finalizing migration without starting one first fails."""
+    server, cql = await setup_single_node_with_powof2_tokens(manager)
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks_vnodes:
+        await cql.run_async(f"CREATE TABLE {ks_vnodes}.t (pk int PRIMARY KEY)")
+        with pytest.raises(HTTPError, match="does not have a tablet map"):
+            await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks_vnodes)
+
+
+@pytest.mark.asyncio
+async def test_migration_upgrade_without_migration(manager: ManagerClient):
+    """Verify that upgrading a node to tablets without an active migration fails."""
+    server, cql = await setup_single_node_with_powof2_tokens(manager)
+
+    with pytest.raises(HTTPError, match="no migration is in progress"):
+        await manager.api.upgrade_node_to_tablets(server.ip_addr)
+
+
+@pytest.mark.asyncio
+async def test_migration_overlapping_migrations(manager: ManagerClient):
+    """Verify that starting a second migration while one is already in progress fails."""
+    server, cql = await setup_single_node_with_powof2_tokens(manager)
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks1:
+        await cql.run_async(f"CREATE TABLE {ks1}.t (pk int PRIMARY KEY)")
+        await manager.api.create_vnode_tablet_migration(server.ip_addr, ks1)
+        await manager.api.upgrade_node_to_tablets(server.ip_addr)
+
+        async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks2:
+            await cql.run_async(f"CREATE TABLE {ks2}.t (pk int PRIMARY KEY)")
+            with pytest.raises(HTTPError, match="Another migration is in progress"):
+                await manager.api.create_vnode_tablet_migration(server.ip_addr, ks2)
+
+        # Rollback: schema changes are not yet supported for migrating keyspaces.
+        # TODO: Remove this once support is added.
+        await manager.api.downgrade_node_to_vnodes(server.ip_addr)
+        await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks1)
+
+
+@pytest.mark.asyncio
+async def test_migration_finalize_before_upgrade(manager: ManagerClient):
+    """Verify that finalizing migration before the node has finished upgrading fails."""
+    server, cql = await setup_single_node_with_powof2_tokens(manager)
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks:
+        await cql.run_async(f"CREATE TABLE {ks}.t (pk int PRIMARY KEY)")
+        await manager.api.create_vnode_tablet_migration(server.ip_addr, ks)
+        await manager.api.upgrade_node_to_tablets(server.ip_addr)
+
+        with pytest.raises(HTTPError, match=fr"Migration finalization failed for keyspace '{ks}': Node .* has not yet migrated table {ks}.t to tablets"):
+            await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks)
+
+        # Rollback: schema changes are not yet supported for migrating keyspaces.
+        # TODO: Remove this once support is added.
+        await manager.api.downgrade_node_to_vnodes(server.ip_addr)
+        await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks)
