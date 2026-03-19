@@ -8,13 +8,25 @@
 
 #pragma once
 
-#include <stddef.h>
+#include <seastar/core/iostream.hh>
+#include <seastar/core/temporary_buffer.hh>
 
-namespace seastar {
 
-class data_source;
+class limiting_data_source_impl final : public seastar::data_source_impl {
+    seastar::data_source _src;
+    size_t _limit;
+    seastar::temporary_buffer<char> _buf;
+    seastar::future<seastar::temporary_buffer<char>> do_get();
 
-}
+public:
+    limiting_data_source_impl(seastar::data_source&& src, size_t limit);
+
+    limiting_data_source_impl(limiting_data_source_impl&&) noexcept = default;
+    limiting_data_source_impl& operator=(limiting_data_source_impl&&) noexcept = default;
+
+    seastar::future<seastar::temporary_buffer<char>> get() override;
+    seastar::future<seastar::temporary_buffer<char>> skip(uint64_t n) override;
+};
 
 /// \brief Creates an data_source from another data_source but returns its data in chunks not bigger than a given limit
 ///

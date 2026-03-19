@@ -7,32 +7,22 @@
  */
 
 #include "limiting_data_source.hh"
-#include <seastar/core/iostream.hh>
-#include <seastar/core/temporary_buffer.hh>
-#include <cstdint>
 
 using namespace seastar;
 
-class limiting_data_source_impl final : public data_source_impl {
-    data_source _src;
-    size_t _limit;
-    temporary_buffer<char> _buf;
-    future<temporary_buffer<char>> do_get() {
+    future<temporary_buffer<char>> limiting_data_source_impl::do_get() {
         uint64_t size = std::min(_limit, _buf.size());
         auto res = _buf.share(0, size);
         _buf.trim_front(size);
         return make_ready_future<temporary_buffer<char>>(std::move(res));
     }
-public:
-    limiting_data_source_impl(data_source&& src, size_t limit)
+
+    limiting_data_source_impl::limiting_data_source_impl(data_source&& src, size_t limit)
         : _src(std::move(src))
         , _limit(limit)
     {}
 
-    limiting_data_source_impl(limiting_data_source_impl&&) noexcept = default;
-    limiting_data_source_impl& operator=(limiting_data_source_impl&&) noexcept = default;
-
-    virtual future<temporary_buffer<char>> get() override {
+    future<temporary_buffer<char>> limiting_data_source_impl::get() {
         if (_buf.empty()) {
             _buf.release();
             return _src.get().then([this] (auto&& buf) {
@@ -42,7 +32,7 @@ public:
         }
         return do_get();
     }
-    virtual future<temporary_buffer<char>> skip(uint64_t n) override {
+    future<temporary_buffer<char>> limiting_data_source_impl::skip(uint64_t n) {
         if (n < _buf.size()) {
             _buf.trim_front(n);
             return do_get();
@@ -54,7 +44,6 @@ public:
             return do_get();
         });
     }
-};
 
 data_source make_limiting_data_source(data_source&& src, size_t limit) {
     return data_source{std::make_unique<limiting_data_source_impl>(std::move(src), limit)};
