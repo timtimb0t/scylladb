@@ -12,7 +12,7 @@
 #include <seastar/core/temporary_buffer.hh>
 
 
-class limiting_data_source_impl final : public seastar::data_source_impl {
+class limiting_data_source_impl : public seastar::data_source_impl {
     seastar::data_source _src;
     size_t _limit;
     seastar::temporary_buffer<char> _buf;
