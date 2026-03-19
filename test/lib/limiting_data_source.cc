@@ -17,21 +17,20 @@ future<temporary_buffer<char>> limiting_data_source_impl::do_get() {
     return make_ready_future<temporary_buffer<char>>(std::move(res));
 }
 
-limiting_data_source_impl::limiting_data_source_impl(data_source&& src, size_t limit)
-    : _src(std::move(src))
-    , _limit(limit)
-{}
+limiting_data_source_impl::limiting_data_source_impl(data_source&& src, size_t limit) : _src(std::move(src)), _limit(limit) {
+}
 
 future<temporary_buffer<char>> limiting_data_source_impl::get() {
     if (_buf.empty()) {
         _buf.release();
-        return _src.get().then([this] (auto&& buf) {
+        return _src.get().then([this](auto&& buf) {
             _buf = std::move(buf);
             return do_get();
         });
     }
     return do_get();
 }
+
 future<temporary_buffer<char>> limiting_data_source_impl::skip(uint64_t n) {
     if (n < _buf.size()) {
         _buf.trim_front(n);
@@ -39,7 +38,7 @@ future<temporary_buffer<char>> limiting_data_source_impl::skip(uint64_t n) {
     }
     n -= _buf.size();
     _buf.release();
-    return _src.skip(n).then([this] (auto&& buf) {
+    return _src.skip(n).then([this](auto&& buf) {
         _buf = std::move(buf);
         return do_get();
     });
