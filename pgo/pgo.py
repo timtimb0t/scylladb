@@ -15,6 +15,7 @@ from typing import Any, Optional
 import asyncio
 import contextlib
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -364,12 +365,14 @@ async def start_node(executable: PathLike, cluster_workdir: PathLike, addr: str,
     llvm_profile_file = f"{addr}-%m.profraw"
     scylla_workdir = f"{addr}"
     logfile = f"{addr}.log"
+    socket = maintenance_socket_path(cluster_workdir, addr)
     command = [
         "env",
         f"LLVM_PROFILE_FILE={llvm_profile_file}",
         f"SCYLLA_HOME={os.path.realpath(os.getcwd())}", # We assume that the script has Scylla's `conf/` as its filesystem neighbour.
         os.path.realpath(executable),
         f"--workdir={scylla_workdir}",
+        f"--maintenance-socket={socket}",
         "--ring-delay-ms=0",
         "--developer-mode=yes",
         "--memory=1G",
@@ -391,6 +394,7 @@ async def start_node(executable: PathLike, cluster_workdir: PathLike, addr: str,
         f"--authenticator=PasswordAuthenticator",
         f"--authorizer=CassandraAuthorizer",
     ] + list(extra_opts)
+    training_logger.info(f"Using maintenance socket {socket}")
     return await run(['bash', '-c', fr"""exec {shlex.join(command)} >{q(logfile)} 2>&1"""], cwd=cluster_workdir)
 
 async def start_cluster(executable: PathLike, addrs: list[str], cpusets: Optional[list[str]], workdir: PathLike, cluster_name: str, extra_opts: list[str]) -> list[Process]:
@@ -433,16 +437,25 @@ async def start_cluster(executable: PathLike, addrs: list[str], cpusets: Optiona
             procs.append(proc)
             await wait_for_node(proc, addrs[i], timeout)
     except:
-        await stop_cluster(procs, addrs)
+        await stop_cluster(procs, addrs, cluster_workdir=workdir)
         raise
     return procs
 
-async def stop_cluster(procs: list[Process], addrs: list[str]) -> None:
+async def stop_cluster(procs: list[Process], addrs: list[str], cluster_workdir: PathLike) -> None:
     """Stops a Scylla cluster started with start_cluster().
     Doesn't return until all nodes exit, even if stop_cluster() is cancelled.
 
     """
     await clean_gather(*[cancel_process(p, timeout=60) for p in procs])
+    _cleanup_short_sockets(cluster_workdir, addrs)
+
+def _cleanup_short_sockets(cluster_workdir: PathLike, addrs: list[str]) -> None:
+    """Remove short maintenance socket files created in /tmp."""
+    for addr in addrs:
+        try:
+            os.unlink(maintenance_socket_path(cluster_workdir, addr))
+        except OSError:
+            pass
 
 async def wait_for_port(addr: str, port: int) -> None:
     await bash(fr'until printf "" >>/dev/tcp/{addr}/{port}; do sleep 0.1; done 2>/dev/null')
@@ -453,12 +466,17 @@ async def merge_profraw(directory: PathLike) -> None:
         await bash(fr"llvm-profdata merge {q(directory)}/*.profraw -output {q(directory)}/prof.profdata")
 
 def maintenance_socket_path(cluster_workdir: PathLike, addr: str) -> str:
-    """Returns the absolute path of the maintenance socket for a given node.
+    """Return the maintenance socket path for a node.
 
-    With ``maintenance_socket: workdir`` in scylla.yaml the socket lives at
-    ``<node-workdir>/cql.m``, i.e. ``<cluster_workdir>/<addr>/cql.m``.
+    Returns a short deterministic path in /tmp (derived from an MD5 hash of
+    the natural ``<cluster_workdir>/<addr>/cql.m`` path) to stay within the
+    Unix domain socket length limit.
+    The same path is passed to Scylla via ``--maintenance-socket`` in
+    ``start_node()``.
     """
-    return os.path.realpath(f"{cluster_workdir}/{addr}/cql.m")
+    natural = os.path.realpath(f"{cluster_workdir}/{addr}/cql.m")
+    path_hash = hashlib.md5(natural.encode()).hexdigest()[:12]
+    return os.path.join(tempfile.gettempdir(), f'pgo-{path_hash}.m')
 
 async def setup_cassandra_user(workdir: PathLike, addr: str) -> None:
     """Create the ``cassandra`` superuser via the maintenance socket.
@@ -525,7 +543,7 @@ async def with_cluster(executable: PathLike, workdir: PathLike, cpusets: Optiona
         yield addrs, procs
     finally:
         training_logger.info(f"Stopping the cluster in {workdir}")
-        await stop_cluster(procs, addrs)
+        await stop_cluster(procs, addrs, cluster_workdir=workdir)
         training_logger.info(f"Stopped the cluster in {workdir}")
 
 ################################################################################
