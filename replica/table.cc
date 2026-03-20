@@ -4860,13 +4860,14 @@ table::query(schema_ptr query_schema,
     }
 
     std::optional<full_position> last_pos;
-    if (querier_opt && querier_opt->current_position()) {
-        last_pos.emplace(*querier_opt->current_position());
-    }
-
-    if (querier_opt && (!saved_querier || (!querier_opt->are_limits_reached() && !qs.builder.is_short_read()))) {
-        co_await querier_opt->close();
-        querier_opt = {};
+    if (querier_opt) {
+        if (querier_opt->current_position()) {
+            last_pos.emplace(*querier_opt->current_position());
+        }
+        if (!saved_querier || (!querier_opt->are_limits_reached() && !qs.builder.is_short_read())) {
+            co_await querier_opt->close();
+            querier_opt = {};
+        }
     }
     if (saved_querier) {
         *saved_querier = std::move(querier_opt);
