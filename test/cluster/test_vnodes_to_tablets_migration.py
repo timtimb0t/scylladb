@@ -636,3 +636,76 @@ async def test_migration_finalize_before_upgrade(manager: ManagerClient):
         # TODO: Remove this once support is added.
         await manager.api.downgrade_node_to_vnodes(server.ip_addr)
         await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks)
+
+
+@pytest.mark.asyncio
+async def test_migration_multiple_keyspaces(manager: ManagerClient):
+    """Verify that two keyspaces can be migrated from vnodes to tablets simultaneously."""
+    num_shards = 3
+    tokens_per_node = 16
+
+    logger.info(f"Starting a node with {num_shards} shards and {tokens_per_node} power-of-2 aligned tokens")
+    tokens = calculate_powof2_tokens(num_nodes=1, tokens_per_node=tokens_per_node)
+    token_list = tokens[1]
+    initial_token = ','.join([str(t) for t in token_list])
+    servers = await manager.servers_add(1, cmdline=['--smp', str(num_shards), '--initial-token', initial_token])
+    server = servers[0]
+    host_id = await manager.get_host_id(server.server_id)
+
+    cql, _ = await manager.get_ready_cql(servers)
+
+    ks_opts = "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}"
+
+    logger.info("Creating two vnode keyspaces with tables")
+    async with new_test_keyspace(manager, ks_opts) as ks1:
+        async with new_test_keyspace(manager, ks_opts) as ks2:
+            await cql.run_async(f"CREATE TABLE {ks1}.t (pk int PRIMARY KEY, c int)")
+            await cql.run_async(f"CREATE TABLE {ks2}.t (pk int PRIMARY KEY, c int)")
+
+            logger.info("Preparing both keyspaces for migration (creating tablet maps)")
+            await manager.api.create_vnode_tablet_migration(server.ip_addr, ks1)
+            await manager.api.create_vnode_tablet_migration(server.ip_addr, ks2)
+
+            logger.info("Marking node for tablets migration and restarting")
+            await manager.api.upgrade_node_to_tablets(server.ip_addr)
+            await manager.server_restart(server.server_id)
+            await reconnect_driver(manager)
+            cql, _ = await manager.get_ready_cql(servers)
+
+            logger.info("Verifying both keyspaces show as migrating")
+            await verify_migration_status(manager, server, ks1,
+                expected_status='migrating_to_tablets',
+                expected_node_statuses={host_id: ('tablets', 'tablets')},
+                retries=1, retry_interval=1)
+            await verify_migration_status(manager, server, ks2,
+                expected_status='migrating_to_tablets',
+                expected_node_statuses={host_id: ('tablets', 'tablets')},
+                retries=1, retry_interval=1)
+
+            logger.info("Finalizing migration for ks1")
+            await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks1)
+
+            logger.info("Verifying ks1 has tablets enabled")
+            res = await cql.run_async(f"SELECT * FROM system_schema.scylla_keyspaces WHERE keyspace_name = '{ks1}'")
+            assert len(res) == 1 and res[0].initial_tablets is not None, \
+                f"ks1 should use tablets after finalization"
+
+            logger.info("Verifying intended_storage_mode is preserved (ks2 still migrating)")
+            rows = await cql.run_async("SELECT host_id, intended_storage_mode FROM system.topology WHERE key = 'topology'")
+            for row in rows:
+                assert row.intended_storage_mode is not None, \
+                    f"intended_storage_mode should be preserved for node {row.host_id} while ks2 is still migrating"
+
+            logger.info("Finalizing migration for ks2")
+            await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks2)
+
+            logger.info("Verifying ks2 has tablets enabled")
+            res = await cql.run_async(f"SELECT * FROM system_schema.scylla_keyspaces WHERE keyspace_name = '{ks2}'")
+            assert len(res) == 1 and res[0].initial_tablets is not None, \
+                f"ks2 should use tablets after finalization"
+
+            logger.info("Verifying intended_storage_mode is cleared (no more migrating keyspaces)")
+            rows = await cql.run_async("SELECT host_id, intended_storage_mode FROM system.topology WHERE key = 'topology'")
+            for row in rows:
+                assert row.intended_storage_mode is None, \
+                    f"intended_storage_mode should be cleared for node {row.host_id} after all migrations are done, got '{row.intended_storage_mode}'"
