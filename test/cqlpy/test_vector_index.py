@@ -264,6 +264,25 @@ def test_vector_index_version_fail_given_as_option(cql, test_keyspace, scylla_on
         with pytest.raises(InvalidRequest, match="Cannot specify index_version as a CUSTOM option"):
             cql.execute(f"CREATE CUSTOM INDEX abc ON {table}(v) USING 'vector_index' WITH OPTIONS = {{'index_version': '18ad2003-05ea-17d9-1855-0325ac0a755d'}}")
 
+# Test that the "target" option in system_schema.indexes is serialized
+# correctly for a vector index on a single vector column. This format is
+# critical for backward compatibility, as it's read from disk on startup
+# to rebuild indexes. An incompatible change would prevent existing vector
+# indexes from being recreated after an upgrade.
+# This is also an interface with the vector-store service, which relies on the "target"
+# option to identify the target column.
+def test_vector_index_target_serialization(cql, test_keyspace, scylla_only, skip_without_tablets):
+    schema = 'p int primary key, v vector<float, 3>'
+    with new_test_table(cql, test_keyspace, schema) as table:
+        index_name = unique_name()
+        cql.execute(f"CREATE CUSTOM INDEX {index_name} ON {table}(v) USING 'vector_index'")
+
+        res = [r for r in cql.execute('select * from system_schema.indexes')
+               if r.index_name == index_name]
+
+        assert len(res) == 1
+        assert res[0].options['target'] == 'v'
+
 def test_one_vector_index_on_column(cql, test_keyspace, skip_without_tablets):
     schema = "p int primary key, v vector<float, 3>"
     if is_scylla(cql):
