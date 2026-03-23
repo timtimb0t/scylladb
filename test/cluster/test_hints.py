@@ -17,7 +17,7 @@ from test.pylib.manager_client import ManagerClient
 from test.pylib.rest_client import ScyllaMetricsClient, TCPRESTClient, inject_error
 from test.pylib.tablets import get_tablet_replicas
 from test.pylib.scylla_cluster import ReplaceConfig
-from test.pylib.util import wait_for
+from test.pylib.util import gather_safely, wait_for
 
 from test.cluster.util import get_topology_coordinator, find_server_by_host_id, keyspace_has_tablets, new_test_keyspace, new_test_table
 
@@ -74,10 +74,12 @@ async def test_write_cl_any_to_dead_node_generates_hints(manager: ManagerClient)
 
             hints_before = await get_hint_metrics(manager.metrics, servers[0].ip_addr, "written")
 
+            stmt = cql.prepare(f"INSERT INTO {table} (pk, v) VALUES (?, ?)")
+            stmt.consistency_level = ConsistencyLevel.ANY
+
             # Some of the inserts will be targeted to the dead node.
             # The coordinator doesn't have live targets to send the write to, but it should write a hint.
-            for i in range(100):
-                await cql.run_async(SimpleStatement(f"INSERT INTO {table} (pk, v) VALUES ({i}, {i+1})", consistency_level=ConsistencyLevel.ANY))
+            await gather_safely(*[cql.run_async(stmt, (i, i + 1)) for i in range(100)])
 
             # Verify hints are written
             await wait_for_hints_written(hints_before + 1, timeout=60)
