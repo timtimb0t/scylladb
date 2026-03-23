@@ -19,7 +19,7 @@ from test.pylib.tablets import get_tablet_replicas
 from test.pylib.scylla_cluster import ReplaceConfig
 from test.pylib.util import wait_for
 
-from test.cluster.util import get_topology_coordinator, find_server_by_host_id, new_test_keyspace, new_test_table
+from test.cluster.util import get_topology_coordinator, find_server_by_host_id, keyspace_has_tablets, new_test_keyspace, new_test_table
 
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,13 @@ async def test_write_cl_any_to_dead_node_generates_hints(manager: ManagerClient)
 
     cql = manager.get_cql()
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}") as ks:
-        async with new_test_table(manager, ks, "pk int PRIMARY KEY, v int") as table:
+        uses_tablets = await keyspace_has_tablets(manager, ks)
+        # If the keyspace uses tablets, let's explicitly require the table to use multiple tablets.
+        # Otherwise, it could happen that all mutations would target servers[0] only, which would
+        # ultimately lead to a test failure here. We rely on the assumption that mutations will be
+        # distributed more or less uniformly!
+        extra_opts = "WITH tablets = {'min_tablet_count': 16}" if uses_tablets else ""
+        async with new_test_table(manager, ks, "pk int PRIMARY KEY, v int", extra_opts) as table:
             await manager.server_stop_gracefully(servers[1].server_id)
 
             hints_before = await get_hint_metrics(manager.metrics, servers[0].ip_addr, "written")
