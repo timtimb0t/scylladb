@@ -53,6 +53,14 @@ async def test_write_cl_any_to_dead_node_generates_hints(manager: ManagerClient)
     node_count = 2
     servers = await manager.servers_add(node_count)
 
+    async def wait_for_hints_written(min_hint_count: int, timeout: int):
+        async def aux():
+            hints_written = await get_hint_metrics(manager.metrics, servers[0].ip_addr, "written")
+            if hints_written >= min_hint_count:
+                return True
+            return None
+        assert await wait_for(aux, time.time() + timeout)
+
     cql = manager.get_cql()
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}") as ks:
         table = f"{ks}.t"
@@ -68,8 +76,7 @@ async def test_write_cl_any_to_dead_node_generates_hints(manager: ManagerClient)
             await cql.run_async(SimpleStatement(f"INSERT INTO {table} (pk, v) VALUES ({i}, {i+1})", consistency_level=ConsistencyLevel.ANY))
 
         # Verify hints are written
-        hints_after = await get_hint_metrics(manager.metrics, servers[0].ip_addr, "written")
-        assert hints_after > hints_before
+        await wait_for_hints_written(hints_before + 1, timeout=60)
 
         # For dropping the keyspace
         await manager.server_start(servers[1].server_id)
