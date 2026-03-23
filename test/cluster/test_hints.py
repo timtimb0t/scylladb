@@ -19,7 +19,7 @@ from test.pylib.tablets import get_tablet_replicas
 from test.pylib.scylla_cluster import ReplaceConfig
 from test.pylib.util import wait_for
 
-from test.cluster.util import get_topology_coordinator, find_server_by_host_id, new_test_keyspace
+from test.cluster.util import get_topology_coordinator, find_server_by_host_id, new_test_keyspace, new_test_table
 
 
 logger = logging.getLogger(__name__)
@@ -63,23 +63,21 @@ async def test_write_cl_any_to_dead_node_generates_hints(manager: ManagerClient)
 
     cql = manager.get_cql()
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}") as ks:
-        table = f"{ks}.t"
-        await cql.run_async(f"CREATE TABLE {table} (pk int primary key, v int)")
+        async with new_test_table(manager, ks, "pk int PRIMARY KEY, v int") as table:
+            await manager.server_stop_gracefully(servers[1].server_id)
 
-        await manager.server_stop_gracefully(servers[1].server_id)
+            hints_before = await get_hint_metrics(manager.metrics, servers[0].ip_addr, "written")
 
-        hints_before = await get_hint_metrics(manager.metrics, servers[0].ip_addr, "written")
+            # Some of the inserts will be targeted to the dead node.
+            # The coordinator doesn't have live targets to send the write to, but it should write a hint.
+            for i in range(100):
+                await cql.run_async(SimpleStatement(f"INSERT INTO {table} (pk, v) VALUES ({i}, {i+1})", consistency_level=ConsistencyLevel.ANY))
 
-        # Some of the inserts will be targeted to the dead node.
-        # The coordinator doesn't have live targets to send the write to, but it should write a hint.
-        for i in range(100):
-            await cql.run_async(SimpleStatement(f"INSERT INTO {table} (pk, v) VALUES ({i}, {i+1})", consistency_level=ConsistencyLevel.ANY))
+            # Verify hints are written
+            await wait_for_hints_written(hints_before + 1, timeout=60)
 
-        # Verify hints are written
-        await wait_for_hints_written(hints_before + 1, timeout=60)
-
-        # For dropping the keyspace
-        await manager.server_start(servers[1].server_id)
+            # For dropping the keyspace
+            await manager.server_start(servers[1].server_id)
 
 @pytest.mark.asyncio
 async def test_limited_concurrency_of_writes(manager: ManagerClient):
