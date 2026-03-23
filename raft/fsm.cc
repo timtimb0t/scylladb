@@ -1098,7 +1098,8 @@ std::optional<std::pair<read_id, index_t>> fsm::start_read_barrier(server_id req
 
     // Make sure that only a leader or a node that is part of the config can request read barrier
     // Nodes outside of the config may never get the data, so they will not be able to read it.
-    if (requester != _my_id && leader_state().tracker.find(requester) == nullptr) {
+    follower_progress* opt_progress = leader_state().tracker.find(requester);
+    if (requester != _my_id && opt_progress == nullptr) {
         throw std::runtime_error(fmt::format("Read barrier requested by a node outside of the configuration {}", requester));
     }
 
@@ -1107,6 +1108,18 @@ std::optional<std::pair<read_id, index_t>> fsm::start_read_barrier(server_id req
 
     if (*term_for_commit_idx != _current_term) {
         return {};
+    }
+
+    // Optimization for read barriers requested on non-voters. A non-voter doesn't receive the read_quorum message, so
+    // it might update its commit index only after another leader tick, which would slow down wait_for_apply() at the
+    // end of the read barrier. Prevent that by replicating to the non-voting requester here.
+    if (requester != _my_id && opt_progress->commit_idx < _commit_idx && opt_progress->match_idx == _log.last_idx()
+            && !opt_progress->can_vote) {
+        logger.trace("start_read_barrier[{}]: replicate to {} because follower commit_idx={} < commit_idx={}, "
+                     "follower match_idx={} == last_idx={}, and follower can_vote={}",
+                     _my_id, requester, opt_progress->commit_idx, _commit_idx, opt_progress->match_idx,
+                     _log.last_idx(), opt_progress->can_vote);
+        replicate_to(*opt_progress, true);
     }
 
     read_id id = next_read_id();
