@@ -1571,7 +1571,6 @@ future<> server_impl::read_barrier(seastar::abort_source* as) {
             co_return stop_iteration::no;
         }
         read_idx = std::get<index_t>(res);
-        _fsm->maybe_update_commit_idx_for_read(read_idx);
         co_return stop_iteration::yes;
     });
 
