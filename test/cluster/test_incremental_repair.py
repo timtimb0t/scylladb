@@ -151,7 +151,7 @@ async def trigger_tablet_merge(manager, servers, logs):
     await s1_log.wait_for('Detected tablet merge for table', from_mark=s1_mark)
     await inject_error_off(manager, "tablet_force_tablet_count_decrease", servers)
 
-async def preapre_cluster_for_incremental_repair(manager, nr_keys = 100 , cmdline = []):
+async def prepare_cluster_for_incremental_repair(manager, nr_keys = 100 , cmdline = []):
     servers, cql, hosts, ks, table_id = await create_table_insert_data_for_repair(manager, nr_keys=nr_keys, cmdline=cmdline)
     repaired_keys = set(range(0, nr_keys))
     unrepaired_keys = set()
@@ -164,7 +164,7 @@ async def preapre_cluster_for_incremental_repair(manager, nr_keys = 100 , cmdlin
 
 @pytest.mark.asyncio
 async def test_tablet_repair_sstable_skipped_read_metrics(manager: ManagerClient):
-    servers, cql, hosts, ks, table_id, logs, _, _, _, token = await preapre_cluster_for_incremental_repair(manager)
+    servers, cql, hosts, ks, table_id, logs, _, _, _, token = await prepare_cluster_for_incremental_repair(manager)
 
     await insert_keys(cql, ks, 0, 100)
 
@@ -274,7 +274,7 @@ async def test_tablet_incremental_repair_error(manager: ManagerClient):
 
 async def do_tablet_incremental_repair_and_ops(manager: ManagerClient, ops: str):
     nr_keys = 100
-    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await preapre_cluster_for_incremental_repair(manager, nr_keys)
+    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await prepare_cluster_for_incremental_repair(manager, nr_keys)
     token = -1
 
     await manager.api.tablet_repair(servers[0].ip_addr, ks, "test", token, incremental_mode='incremental')
@@ -335,7 +335,7 @@ async def test_tablet_incremental_repair_and_major(manager: ManagerClient):
 @pytest.mark.asyncio
 async def test_tablet_incremental_repair_and_minor(manager: ManagerClient):
     nr_keys = 100
-    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await preapre_cluster_for_incremental_repair(manager, nr_keys)
+    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await prepare_cluster_for_incremental_repair(manager, nr_keys)
 
     # Disable autocompaction
     for server in servers:
@@ -381,7 +381,7 @@ async def test_tablet_incremental_repair_and_minor(manager: ManagerClient):
 
 async def do_test_tablet_incremental_repair_with_split_and_merge(manager, do_split, do_merge):
     nr_keys = 100
-    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await preapre_cluster_for_incremental_repair(manager, nr_keys)
+    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await prepare_cluster_for_incremental_repair(manager, nr_keys)
 
     # First repair
     await manager.api.tablet_repair(servers[0].ip_addr, ks, "test", token, incremental_mode='incremental') # sstables_repaired_at 1
@@ -442,7 +442,7 @@ async def test_tablet_incremental_repair_with_merge(manager: ManagerClient):
 async def test_tablet_incremental_repair_existing_and_repair_produced_sstable(manager: ManagerClient):
     nr_keys = 100
     cmdline = ["--hinted-handoff-enabled", "0"]
-    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await preapre_cluster_for_incremental_repair(manager, nr_keys, cmdline)
+    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await prepare_cluster_for_incremental_repair(manager, nr_keys, cmdline)
 
     await manager.server_stop_gracefully(servers[1].server_id)
 
@@ -466,7 +466,7 @@ async def test_tablet_incremental_repair_existing_and_repair_produced_sstable(ma
 @pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
 async def test_tablet_incremental_repair_merge_higher_repaired_at_number(manager):
     nr_keys = 100
-    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await preapre_cluster_for_incremental_repair(manager, nr_keys)
+    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await prepare_cluster_for_incremental_repair(manager, nr_keys)
 
     # First repair
     await manager.api.tablet_repair(servers[0].ip_addr, ks, "test", token, incremental_mode='incremental') # sstables_repaired_at 1
@@ -507,7 +507,7 @@ async def test_tablet_incremental_repair_merge_higher_repaired_at_number(manager
 @pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
 async def test_tablet_incremental_repair_merge_correct_repaired_at_number_after_merge(manager):
     nr_keys = 100
-    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await preapre_cluster_for_incremental_repair(manager, nr_keys)
+    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await prepare_cluster_for_incremental_repair(manager, nr_keys)
 
     # First repair
     await manager.api.tablet_repair(servers[0].ip_addr, ks, "test", token, incremental_mode='incremental') # sstables_repaired_at 1
@@ -541,7 +541,7 @@ async def do_test_tablet_incremental_repair_merge_error(manager, error):
     nr_keys = 100
     # Make sure no data commit log replay after force server stop
     cmdline = ['--enable-commitlog', '0']
-    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await preapre_cluster_for_incremental_repair(manager, nr_keys, cmdline)
+    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await prepare_cluster_for_incremental_repair(manager, nr_keys, cmdline)
 
     # First repair
     await manager.api.tablet_repair(servers[0].ip_addr, ks, "test", token, incremental_mode='incremental') # sstables_repaired_at 1
@@ -587,7 +587,7 @@ async def test_tablet_incremental_repair_merge_error_in_merge_completion_fiber(m
 
 @pytest.mark.asyncio
 async def test_tablet_repair_with_incremental_option(manager: ManagerClient):
-    servers, cql, hosts, ks, table_id, logs, _, _, _, token = await preapre_cluster_for_incremental_repair(manager)
+    servers, cql, hosts, ks, table_id, logs, _, _, _, token = await prepare_cluster_for_incremental_repair(manager)
     token = -1
 
     sstables_repaired_at = 0
@@ -632,7 +632,7 @@ async def test_tablet_repair_with_incremental_option(manager: ManagerClient):
 
 @pytest.mark.asyncio
 async def test_incremental_repair_tablet_time_metrics(manager: ManagerClient):
-    servers, _, _, ks, _, _, _, _, _, token = await preapre_cluster_for_incremental_repair(manager)
+    servers, _, _, ks, _, _, _, _, _, token = await prepare_cluster_for_incremental_repair(manager)
     time1 = 0
     time2 = 0
 
@@ -820,7 +820,7 @@ async def test_repair_sigsegv_with_diff_shard_count(manager: ManagerClient, use_
 @pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
 async def test_tablet_incremental_repair_table_drop_compaction_group_gone(manager: ManagerClient):
     cmdline = ['--logger-log-level', 'repair=debug']
-    servers, cql, hosts, ks, table_id, logs, _, _, _, _ = await preapre_cluster_for_incremental_repair(manager, cmdline=cmdline)
+    servers, cql, hosts, ks, table_id, logs, _, _, _, _ = await prepare_cluster_for_incremental_repair(manager, cmdline=cmdline)
 
     coord = await get_topology_coordinator(manager)
     coord_serv = await find_server_by_host_id(manager, servers, coord)
