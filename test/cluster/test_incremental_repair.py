@@ -274,7 +274,7 @@ async def test_tablet_incremental_repair_error(manager: ManagerClient):
 
 async def do_tablet_incremental_repair_and_ops(manager: ManagerClient, ops: str):
     nr_keys = 100
-    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await prepare_cluster_for_incremental_repair(manager, nr_keys)
+    servers, cql, hosts, ks, table_id, logs, repaired_keys, unrepaired_keys, current_key, token = await prepare_cluster_for_incremental_repair(manager, nr_keys, cmdline=['--logger-log-level', 'compaction=debug'])
     token = -1
 
     await manager.api.tablet_repair(servers[0].ip_addr, ks, "test", token, incremental_mode='incremental')
