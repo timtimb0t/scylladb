@@ -51,7 +51,8 @@ async def await_sync_point(client: TCPRESTClient, server_ip: IPAddress, sync_poi
 @pytest.mark.asyncio
 async def test_write_cl_any_to_dead_node_generates_hints(manager: ManagerClient):
     node_count = 2
-    servers = await manager.servers_add(node_count)
+    cmdline = ["--logger-log-level", "hints_manager=trace"]
+    servers = await manager.servers_add(node_count, cmdline=cmdline)
 
     async def wait_for_hints_written(min_hint_count: int, timeout: int):
         async def aux():
