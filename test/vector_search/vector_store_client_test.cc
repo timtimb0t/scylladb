@@ -1281,3 +1281,26 @@ SEASTAR_TEST_CASE(vector_store_client_vector_index_with_additional_filtering_col
                 co_await server->stop();
             }));
 }
+
+SEASTAR_TEST_CASE(vector_store_client_local_vector_index) {
+    auto server = co_await make_vs_mock_server();
+
+    auto cfg = make_config();
+    cfg.db_config->vector_store_primary_uri.set(format("http://server.node:{}", server->port()));
+    co_await do_with_cql_env(
+            [&](cql_test_env& env) -> future<> {
+                auto schema = co_await create_test_table(env, "ks", "test");
+                auto& vs = env.local_qp().vector_store_client();
+                configure(vs).with_dns({{"server.node", std::vector<std::string>{server->host()}}});
+                vs.start_background_tasks();
+                // Create a local vector index on the 'embedding' column.
+                auto result = co_await env.execute_cql("CREATE CUSTOM INDEX idx ON ks.test ((pk1, pk2), embedding) USING 'vector_index'");
+
+                BOOST_CHECK_NO_THROW(
+                        co_await env.execute_cql("SELECT * FROM ks.test WHERE pk1 = 1 AND pk2 = 2 ORDER BY embedding ANN OF [0.1, 0.2, 0.3] LIMIT 5;"));
+            },
+            cfg)
+            .finally(seastar::coroutine::lambda([&] -> future<> {
+                co_await server->stop();
+            }));
+}

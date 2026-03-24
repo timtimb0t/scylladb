@@ -105,17 +105,79 @@ const static std::unordered_map<sstring, std::function<void(const sstring&, cons
         {"rescoring", std::bind_front(validate_enumerated_option, boolean_values)},
     };
 
-sstring get_vector_index_target_column(const sstring& targets) {
-    std::optional<rjson::value> json_value = rjson::try_parse(targets);
-    if (!json_value || !json_value->IsObject()) {
-        return target_parser::get_target_column_name_from_string(targets);
+static constexpr auto TC_TARGET_KEY = "tc";
+static constexpr auto PK_TARGET_KEY = "pk";
+static constexpr auto FC_TARGET_KEY = "fc";
+
+// Serialize vector index targets into a format using:
+//   "tc" for the target (vector) column,
+//   "pk" for partition key columns (local index),
+//   "fc" for filtering columns.
+// For a simple single-column vector index, returns just the column name.
+// Examples:
+//   (v)                          -> "v"
+//   (v, f1, f2)                  -> {"tc":"v","fc":["f1","f2"]}
+//   ((p1, p2), v)                -> {"tc":"v","pk":["p1","p2"]}
+//   ((p1, p2), v, f1, f2)        -> {"tc":"v","pk":["p1","p2"],"fc":["f1","f2"]}
+sstring vector_index::serialize_targets(const std::vector<::shared_ptr<cql3::statements::index_target>>& targets) {
+    using cql3::statements::index_target;
+
+    if (targets.size() == 0) {
+        throw exceptions::invalid_request_exception("Vector index must have at least one target column");
     }
 
-    rjson::value* pk = rjson::find(*json_value, "pk");
-    if (pk && pk->IsArray() && !pk->Empty()) {
-        return sstring(rjson::to_string_view(pk->GetArray()[0]));
+    if (targets.size() == 1) {
+        auto tc = targets[0]->value;
+        if (!std::holds_alternative<index_target::single_column>(tc)) {
+            throw exceptions::invalid_request_exception("Missing vector column target for local vector index");
+        }
+        return index_target::escape_target_column(*std::get<index_target::single_column>(tc));
     }
-    return target_parser::get_target_column_name_from_string(targets);
+
+    const bool has_pk = std::holds_alternative<index_target::multiple_columns>(targets.front()->value);
+    const size_t tc_idx = has_pk ? 1 : 0;
+    const size_t fc_count = targets.size() - tc_idx - 1;
+
+    if (!std::holds_alternative<index_target::single_column>(targets[tc_idx]->value)) {
+        throw exceptions::invalid_request_exception("Vector index target column must be a single column");
+    }
+
+    rjson::value json_map = rjson::empty_object();
+    rjson::add_with_string_name(json_map, TC_TARGET_KEY, rjson::from_string(std::get<index_target::single_column>(targets[tc_idx]->value)->text()));
+
+    if (has_pk) {
+        rjson::value pk_json = rjson::empty_array();
+        for (const auto& col : std::get<index_target::multiple_columns>(targets.front()->value)) {
+            rjson::push_back(pk_json, rjson::from_string(col->text()));
+        }
+        rjson::add_with_string_name(json_map, PK_TARGET_KEY, std::move(pk_json));
+    }
+
+    if (fc_count > 0) {
+        rjson::value fc_json = rjson::empty_array();
+        for (size_t i = tc_idx + 1; i < targets.size(); ++i) {
+            if (!std::holds_alternative<index_target::single_column>(targets[i]->value)) {
+                throw exceptions::invalid_request_exception("Vector index filtering column must be a single column");
+            }
+            rjson::push_back(fc_json, rjson::from_string(std::get<index_target::single_column>(targets[i]->value)->text()));
+        }
+        rjson::add_with_string_name(json_map, FC_TARGET_KEY, std::move(fc_json));
+    }
+
+    return rjson::print(json_map);
+}
+
+sstring vector_index::get_target_column(const sstring& targets) {
+    std::optional<rjson::value> json_value = rjson::try_parse(targets);
+    if (!json_value || !json_value->IsObject()) {
+        return cql3::statements::index_target::column_name_from_target_string(targets);
+    }
+
+    rjson::value* tc = rjson::find(*json_value, TC_TARGET_KEY);
+    if (tc && tc->IsString()) {
+        return sstring(rjson::to_string_view(*tc));
+    }
+    return cql3::statements::index_target::column_name_from_target_string(targets);
 }
 
 bool vector_index::is_rescoring_enabled(const index_options_map& properties) {
@@ -346,7 +408,7 @@ bool vector_index::is_vector_index_on_column(const index_metadata& im, const sst
     auto target_it = im.options().find(cql3_parser::index_target::target_option_name);
     if (class_it != im.options().end() && target_it != im.options().end()) {
         auto custom_class = secondary_index_manager::get_custom_class_factory(class_it->second);
-        return custom_class && dynamic_cast<vector_index*>((*custom_class)().get()) && get_vector_index_target_column(target_it->second) == target_name;
+        return custom_class && dynamic_cast<vector_index*>((*custom_class)().get()) && get_target_column(target_it->second) == target_name;
     }
     return false;
 }

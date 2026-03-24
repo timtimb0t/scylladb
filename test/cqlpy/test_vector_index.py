@@ -7,6 +7,7 @@
 ###############################################################################
 
 import pytest
+import json
 from .util import new_test_table, is_scylla, unique_name
 from cassandra.protocol import InvalidRequest, ConfigurationException
 
@@ -282,6 +283,45 @@ def test_vector_index_target_serialization(cql, test_keyspace, scylla_only, skip
 
         assert len(res) == 1
         assert res[0].options['target'] == 'v'
+
+# Test "target" option serialization for vector index with filtering columns.
+def test_vector_index_target_serialization_filtering_columns(cql, test_keyspace, scylla_only, skip_without_tablets):
+    schema = 'p int primary key, v vector<float, 3>, f1 int, f2 int'
+    with new_test_table(cql, test_keyspace, schema) as table:
+        index_name = unique_name()
+        cql.execute(f"CREATE CUSTOM INDEX {index_name} ON {table}(v, f1, f2) USING 'vector_index'")
+
+        res = [r for r in cql.execute('select * from system_schema.indexes')
+               if r.index_name == index_name]
+
+        assert len(res) == 1
+        assert json.loads(res[0].options['target']) == {"tc": "v", "fc": ["f1", "f2"]}
+
+# Test "target" option serialization for local vector index.
+def test_vector_index_target_serialization_local_index(cql, test_keyspace, scylla_only, skip_without_tablets):
+    schema = 'p1 int, p2 int, c1 int, c2 int, v vector<float, 3>, PRIMARY KEY ((p1, p2), c1, c2)'
+    with new_test_table(cql, test_keyspace, schema) as table:
+        index_name = unique_name()
+        cql.execute(f"CREATE CUSTOM INDEX {index_name} ON {table}((p1, p2), v) USING 'vector_index'")
+
+        res = [r for r in cql.execute('select * from system_schema.indexes')
+               if r.index_name == index_name]
+
+        assert len(res) == 1
+        assert json.loads(res[0].options['target']) == {"tc": "v", "pk": ["p1", "p2"]}
+
+# Test "target" option serialization for local vector index with filtering columns.
+def test_vector_index_target_serialization_local_index_with_filtering_columns(cql, test_keyspace, scylla_only, skip_without_tablets):
+    schema = 'p1 int, p2 int, c1 int, c2 int, v vector<float, 3>, f1 text, f2 text, PRIMARY KEY ((p1, p2), c1, c2)'
+    with new_test_table(cql, test_keyspace, schema) as table:
+        index_name = unique_name()
+        cql.execute(f"CREATE CUSTOM INDEX {index_name} ON {table}((p1, p2), v, f1, f2) USING 'vector_index'")
+
+        res = [r for r in cql.execute('select * from system_schema.indexes')
+               if r.index_name == index_name]
+
+        assert len(res) == 1
+        assert json.loads(res[0].options['target']) == {"tc": "v", "pk": ["p1", "p2"], "fc": ["f1", "f2"]}
 
 def test_one_vector_index_on_column(cql, test_keyspace, skip_without_tablets):
     schema = "p int primary key, v vector<float, 3>"

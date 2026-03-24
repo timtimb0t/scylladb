@@ -380,6 +380,7 @@ add_scylla_test(combined_tests
     tracing_test.cc
     user_function_test.cc
     user_types_test.cc
+    vector_index_test.cc
     view_build_test.cc
     view_complex_test.cc
     view_schema_ckey_test.cc

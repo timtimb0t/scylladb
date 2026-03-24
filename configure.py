@@ -1714,6 +1714,7 @@ deps['test/boost/combined_tests'] += [
     'test/boost/tracing_test.cc',
     'test/boost/user_function_test.cc',
     'test/boost/user_types_test.cc',
+    'test/boost/vector_index_test.cc',
     'test/boost/view_build_test.cc',
     'test/boost/view_complex_test.cc',
     'test/boost/view_schema_ckey_test.cc',

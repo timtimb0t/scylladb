@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: (LicenseRef-ScyllaDB-Source-Available-1.0 and Apache-2.0)
  */
 
+#include <boost/algorithm/string.hpp>
 #include <seastar/core/coroutine.hh>
 #include "create_index_statement.hh"
 #include "db/config.hh"
@@ -37,6 +38,7 @@
 #include "types/concrete_types.hh"
 #include "db/tags/extension.hh"
 #include "tombstone_gc_extension.hh"
+#include "index/secondary_index.hh"
 
 #include <stdexcept>
 
@@ -114,6 +116,15 @@ static data_type type_for_computed_column(cql3::statements::index_target::target
         case index_target::target_type::collection_values:  return collection_values_type(collection_type);
         default: throw std::logic_error("reached regular values or full when only collection index target types were expected");
     }
+}
+
+static bool is_vector_capable_class(const sstring& class_name) {
+    return boost::iequals(class_name, "vector_index");
+}
+
+static bool is_vector_index(const index_options_map& options) {
+    auto class_it = options.find(db::index::secondary_index::custom_class_option_name);
+    return class_it != options.end() && is_vector_capable_class(class_it->second);
 }
 
 view_ptr create_index_statement::create_view_for_index(const schema_ptr schema, const index_metadata& im,
@@ -266,7 +277,7 @@ create_index_statement::validate(query_processor& qp, const service::client_stat
     _idx_properties->validate();
 
     // FIXME: This is ugly and can be improved.
-    const bool is_vector_index = _idx_properties->custom_class && *_idx_properties->custom_class == "vector_index";
+    const bool is_vector_index = _idx_properties->custom_class && is_vector_capable_class(*_idx_properties->custom_class);
     const bool uses_view_properties = _view_properties.properties()->count() > 0
             || _view_properties.use_compact_storage()
             || _view_properties.defined_ordering().size() > 0;
@@ -697,7 +708,9 @@ index_metadata create_index_statement::make_index_metadata(const std::vector<::s
                                                            const index_options_map& options)
 {
     index_options_map new_options = options;
-    auto target_option = secondary_index::target_parser::serialize_targets(targets);
+    auto target_option = is_vector_index(options)
+        ? secondary_index::vector_index::serialize_targets(targets)
+        : secondary_index::target_parser::serialize_targets(targets);
     new_options.emplace(index_target::target_option_name, target_option);
 
     const auto& first_target = targets.front()->value;

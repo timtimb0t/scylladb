@@ -37,6 +37,9 @@ public:
     static bool is_vector_index_on_column(const index_metadata& im, const sstring& target_name);
     static void check_cdc_options(const schema& schema);
 
+    static sstring serialize_targets(const std::vector<::shared_ptr<cql3::statements::index_target>>& targets);
+    static sstring get_target_column(const sstring& targets);
+
     static bool is_rescoring_enabled(const index_options_map& properties);
     static float get_oversampling(const index_options_map& properties);
     static sstring get_cql_similarity_function_name(const index_options_map& properties);
