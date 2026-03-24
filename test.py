@@ -181,7 +181,7 @@ def parse_cmd_line() -> argparse.Namespace:
                         help="Run only tests for given build mode(s)")
     parser.add_argument('--repeat', action="store", default="1", type=int,
                         help="number of times to repeat test execution")
-    parser.add_argument('--timeout', action="store", default="24000", type=int,
+    parser.add_argument('--timeout', action="store", default="3600", type=int,
                         help="timeout value for single test execution")
     parser.add_argument('--session-timeout', action="store", default="24000", type=int,
                         help="timeout value for test.py/pytest session execution")
