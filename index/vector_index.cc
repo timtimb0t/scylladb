@@ -20,6 +20,7 @@
 #include "types/concrete_types.hh"
 #include "types/types.hh"
 #include "utils/managed_string.hh"
+#include <ranges>
 #include <seastar/core/sstring.hh>
 #include <boost/algorithm/string.hpp>
 
@@ -103,11 +104,52 @@ const static std::unordered_map<sstring, std::function<void(const sstring&, cons
         {"oversampling", std::bind_front(validate_factor_option, 1.0f, 100.0f)},
         // 'rescoring' enables recalculating of similarity scores of candidates retrieved from vector store when quantization is used.
         {"rescoring", std::bind_front(validate_enumerated_option, boolean_values)},
-    };
+};
 
 static constexpr auto TC_TARGET_KEY = "tc";
 static constexpr auto PK_TARGET_KEY = "pk";
 static constexpr auto FC_TARGET_KEY = "fc";
+
+// Convert a serialized targets string (as produced by serialize_targets())
+// back into the CQL column list used inside CREATE INDEX ... ON table(<here>).
+//
+// JSON examples:
+//   {"tc":"v","fc":["f1","f2"]}               -> "v, f1, f2"
+//   {"tc":"v","pk":["p1","p2"]}               -> "(p1, p2), v"
+//   {"tc":"v","pk":["p1","p2"],"fc":["f1"]}   -> "(p1, p2), v, f1"
+static sstring targets_to_cql(const sstring& targets) {
+    std::optional<rjson::value> json_value = rjson::try_parse(targets);
+    if (!json_value || !json_value->IsObject()) {
+        return cql3::util::maybe_quote(cql3::statements::index_target::column_name_from_target_string(targets));
+    }
+
+    sstring result;
+
+    const rjson::value* pk = rjson::find(*json_value, PK_TARGET_KEY);
+    if (pk && pk->IsArray() && !pk->Empty()) {
+        result += "(";
+        auto pk_cols = std::views::all(pk->GetArray()) | std::views::transform([&](const rjson::value& col) {
+            return cql3::util::maybe_quote(sstring(rjson::to_string_view(col)));
+        }) | std::ranges::to<std::vector<sstring>>();
+        result += boost::algorithm::join(pk_cols, ", ");
+        result += "), ";
+    }
+
+    const rjson::value* tc = rjson::find(*json_value, TC_TARGET_KEY);
+    if (tc && tc->IsString()) {
+        result += cql3::util::maybe_quote(sstring(rjson::to_string_view(*tc)));
+    }
+
+    const rjson::value* fc = rjson::find(*json_value, FC_TARGET_KEY);
+    if (fc && fc->IsArray()) {
+        for (rapidjson::SizeType i = 0; i < fc->Size(); ++i) {
+            result += ", ";
+            result += cql3::util::maybe_quote(sstring(rjson::to_string_view((*fc)[i])));
+        }
+    }
+
+    return result;
+}
 
 // Serialize vector index targets into a format using:
 //   "tc" for the target (vector) column,
@@ -209,9 +251,8 @@ bool vector_index::view_should_exist() const {
 
 std::optional<cql3::description> vector_index::describe(const index_metadata& im, const schema& base_schema) const {
     fragmented_ostringstream os;
-    os << "CREATE CUSTOM INDEX " << cql3::util::maybe_quote(im.name()) << " ON "
-       << cql3::util::maybe_quote(base_schema.ks_name()) << "." << cql3::util::maybe_quote(base_schema.cf_name())
-       << "(" << cql3::util::maybe_quote(im.options().at(cql3::statements::index_target::target_option_name)) << ")"
+    os << "CREATE CUSTOM INDEX " << cql3::util::maybe_quote(im.name()) << " ON " << cql3::util::maybe_quote(base_schema.ks_name()) << "."
+       << cql3::util::maybe_quote(base_schema.cf_name()) << "(" << targets_to_cql(im.options().at(cql3::statements::index_target::target_option_name)) << ")"
        << " USING 'vector_index'";
 
     return cql3::description{
