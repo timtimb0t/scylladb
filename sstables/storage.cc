@@ -449,6 +449,7 @@ future<> filesystem_storage::snapshot(const sstable& sst, sstring name) const {
     co_await create_links_common(sst, snapshot_dir.native(), sst._generation, link_mode::default_mode);
 }
 future<> filesystem_storage::clone(const sstable& sst, generation_type gen, bool leave_unsealed) const {
+    sstlog.debug("Cloning {} dir={} generation={} leave_unsealed={}", sst.get_filename(), _dir.path().native(), gen, leave_unsealed);
     co_await create_links_common(sst, _dir.path().native(), std::move(gen), leave_unsealed ? link_mode::leave_unsealed : link_mode::default_mode);
 }
 
