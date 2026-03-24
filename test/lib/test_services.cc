@@ -23,6 +23,7 @@
 #include "utils/assert.hh"
 #include "utils/overloaded_functor.hh"
 #include <boost/program_options.hpp>
+#include <filesystem>
 #include <iostream>
 #include <fmt/ranges.h>
 #include <seastar/util/defer.hh>
@@ -390,12 +391,24 @@ test_env::make_sstable(schema_ptr schema, sstring dir, sstables::generation_type
         size_t buffer_size, db_clock::time_point now) {
     // FIXME -- most of the callers work with _impl->dir's path, so
     // test_env can initialize the .dir/.prefix only once, when constructed
+    sstables::sstable_state state = sstables::sstable_state::normal;
+    auto filename = std::filesystem::path(dir).filename().native();
+    if (filename == sstables::staging_dir) {
+        state = sstables::sstable_state::staging;
+    } else if (filename == sstables::upload_dir) {
+        state = sstables::sstable_state::upload;
+    } else if (filename == sstables::quarantine_dir) {
+        state = sstables::sstable_state::quarantine;
+    }
+    if (state != sstables::sstable_state::normal) {
+        dir = std::filesystem::path(dir).parent_path().native();
+    }
     auto storage = _impl->storage;
     std::visit(overloaded_functor {
         [&dir] (data_dictionary::storage_options::local& o) { o.dir = dir; },
         [&schema] (data_dictionary::storage_options::object_storage& o) { o.location = schema->id(); },
     }, storage.value);
-    return _impl->mgr.make_sstable(std::move(schema), storage, generation, sstables::sstable_state::normal, v, f, now, default_io_error_handler_gen(), buffer_size);
+    return _impl->mgr.make_sstable(std::move(schema), storage, generation, state, v, f, now, default_io_error_handler_gen(), buffer_size);
 }
 
 shared_sstable
