@@ -532,7 +532,7 @@ def test_table_ss_old_image(dynamodb, dynamodbstreams):
         yield stream
 
 @pytest.fixture(scope="module")
-def test_table_ss_new_and_old_images_write_isolation_always(dynamodb, dynamodbstreams):
+def test_table_ss_new_and_old_images_write_isolation_always(dynamodb, dynamodbstreams, scylla_only):
     with create_table_ss(dynamodb, dynamodbstreams, 'NEW_AND_OLD_IMAGES', additional_tags = [{'Key': 'system:write_isolation', 'Value': 'always'}]) as stream:
         yield stream
 
