@@ -858,7 +858,11 @@ def test_streams_putitem_keys_only(test_table_ss_keys_only, dynamodb, dynamodbst
 #   - delete one, modify others - 3 times for each of the 3 items
 #   - delete all
 #   - modify all 3
-# this requires write isolation set to always, which executes different code path, otherwise the test will pass
+# This test uses "always" write isolation mode because only in that mode
+# (always_use_lwt) all items in a batch get the same CDC timestamp, which
+# is what triggers the bug - the stream-reading code would squash together
+# entries with the same timestamp. In other write isolation modes each item
+# gets a separate timestamp so the bug doesn't manifest.
 # reproduces #28439
 def test_streams_batchwrite_into_the_same_partition_deletes_existing_items(test_table_ss_new_and_old_images_write_isolation_always, dynamodb, dynamodbstreams):
     def do_updates(table, p, c):
@@ -939,16 +943,20 @@ def test_streams_batchwrite_into_the_same_partition_deletes_existing_items(test_
 
 
 # send single batch of multiple put items into the same partition on empty table
-# this will create 3 items in a single batch and trigger the bug (see #28452) -
-# Streams instead of returning 3 modify events will return one with all update information squashed randomly together
+# this will create 3 items in a single batch and trigger the bug -
+# Streams instead of returning 3 insert events will return one with all update information squashed randomly together
 # for example instead of
-#     expected event 0: type=MODIFY, key={'p': 'D9SIWYN8AV', 'c': 'MQAEANDW9N0'}, old_image=None, new_image={'p': 'D9SIWYN8AV', 'c': 'MQAEANDW9N0'}
-#     expected event 1: type=MODIFY, key={'p': 'D9SIWYN8AV', 'c': 'MQAEANDW9N1'}, old_image=None, new_image={'p': 'D9SIWYN8AV', 'c': 'MQAEANDW9N1'}
-#     expected event 2: type=MODIFY, key={'p': 'D9SIWYN8AV', 'c': 'MQAEANDW9N2'}, old_image=None, new_image={'p': 'D9SIWYN8AV', 'c': 'MQAEANDW9N2'}
+#     expected event 0: type=INSERT, key={'p': 'p', 'c': 'c0'}, old_image=None, new_image={'p': 'p', 'c': 'c0'}
+#     expected event 1: type=INSERT, key={'p': 'p', 'c': 'c1'}, old_image=None, new_image={'p': 'p', 'c': 'c1'}
+#     expected event 2: type=INSERT, key={'p': 'p', 'c': 'c2'}, old_image=None, new_image={'p': 'p', 'c': 'c2'}
 # you will get
-#     type=INSERT, key={'c': {'S': 'MQAEANDW9N0'}, 'p': {'S': 'D9SIWYN8AV'}}, old_image=None, new_image={'c': {'S': 'MQAEANDW9N2'}, 'p': {'S': 'D9SIWYN8AV'}}
-# note how new image has different clustering key (`c`) from `c` value in `key`, while in expected events all keys match each other
-# this is not affected by `alternator_streams_increased_compatibility` flag
+#     type=INSERT, key={'c': {'S': 'c0'}, 'p': {'S': 'p'}}, old_image=None, new_image={'c': {'S': 'c2'}, 'p': {'S': 'p'}}
+# note how new image has different clustering key (`c`) from `c` value in `key`, while in expected events all keys match each other.
+# This test uses "always" write isolation mode because only in that mode
+# (always_use_lwt) all items in a batch get the same CDC timestamp, which
+# is what triggers the bug. In other write isolation modes each item gets
+# a separate timestamp so the bug doesn't manifest.
+# This is not affected by `alternator_streams_increased_compatibility` flag.
 # reproduces #28439
 def test_streams_batchwrite_into_the_same_partition_will_report_wrong_stream_data(test_table_ss_new_and_old_images_write_isolation_always, dynamodb, dynamodbstreams):
     def do_updates(table, p, c):
