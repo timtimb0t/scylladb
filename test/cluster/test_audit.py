@@ -511,7 +511,7 @@ class AuditBackendComposite(AuditBackend):
         return rows_dict
 
 
-class TestCQLAudit(AuditTester):
+class CQLAuditTester(AuditTester):
     """
     Make sure CQL statements are audited
     """
@@ -1762,7 +1762,7 @@ class TestCQLAudit(AuditTester):
 
 async def test_audit_table_noauth(manager: ManagerClient):
     """Table backend, no auth, single node — groups all tests that share this config."""
-    t = TestCQLAudit(manager)
+    t = CQLAuditTester(manager)
     await t.test_using_non_existent_keyspace(AuditBackendTable)
     await t.test_audit_keyspace(AuditBackendTable)
     await t.test_audit_keyspace_extra_parameter(AuditBackendTable)
@@ -1786,7 +1786,7 @@ async def test_audit_table_noauth(manager: ManagerClient):
 
 async def test_audit_table_auth(manager: ManagerClient):
     """Table backend, auth enabled, single node."""
-    t = TestCQLAudit(manager)
+    t = CQLAuditTester(manager)
     await t.test_user_password_masking(AuditBackendTable)
     await t.test_negative_audit_records_auth()
     await t.test_negative_audit_records_admin()
@@ -1802,7 +1802,7 @@ async def test_audit_table_auth(manager: ManagerClient):
 
 async def test_audit_table_auth_multinode(manager: ManagerClient):
     """Table backend, auth enabled, multi-node (rf=3)."""
-    t = TestCQLAudit(manager)
+    t = CQLAuditTester(manager)
     await t.test_negative_audit_records_ddl()
 
 
@@ -1810,49 +1810,49 @@ async def test_audit_table_auth_multinode(manager: ManagerClient):
 
 async def test_audit_type_none_standalone(manager: ManagerClient):
     """audit=None — verify no auditing occurs."""
-    await TestCQLAudit(manager).test_audit_type_none()
+    await CQLAuditTester(manager).test_audit_type_none()
 
 
 async def test_audit_type_invalid_standalone(manager: ManagerClient):
     """audit=invalid — server should fail to start."""
-    await TestCQLAudit(manager).test_audit_type_invalid()
+    await CQLAuditTester(manager).test_audit_type_invalid()
 
 
 async def test_composite_audit_type_invalid_standalone(manager: ManagerClient):
     """audit=table,syslog,invalid — server should fail to start."""
-    await TestCQLAudit(manager).test_composite_audit_type_invalid()
+    await CQLAuditTester(manager).test_composite_audit_type_invalid()
 
 
 async def test_audit_empty_settings_standalone(manager: ManagerClient):
     """audit=none — verify no auditing occurs."""
-    await TestCQLAudit(manager).test_audit_empty_settings()
+    await CQLAuditTester(manager).test_audit_empty_settings()
 
 
 async def test_composite_audit_empty_settings_standalone(manager: ManagerClient):
     """audit=table,syslog,none — verify no auditing occurs."""
-    await TestCQLAudit(manager).test_composite_audit_empty_settings()
+    await CQLAuditTester(manager).test_composite_audit_empty_settings()
 
 
 async def test_audit_categories_invalid_standalone(manager: ManagerClient):
     """Invalid audit_categories — server should fail to start."""
-    await TestCQLAudit(manager).test_audit_categories_invalid()
+    await CQLAuditTester(manager).test_audit_categories_invalid()
 
 
 async def test_insert_failure_standalone(manager: ManagerClient):
     """7-node topology, audit=table, no auth — standalone due to unique topology."""
-    await TestCQLAudit(manager).test_insert_failure_doesnt_report_success()
+    await CQLAuditTester(manager).test_insert_failure_doesnt_report_success()
 
 
 async def test_service_level_statements_standalone(manager: ManagerClient):
     """audit=table, auth, cmdline=--smp 1 — standalone due to special cmdline."""
-    await TestCQLAudit(manager).test_service_level_statements()
+    await CQLAuditTester(manager).test_service_level_statements()
 
 
 # AuditBackendSyslog, no auth, rf=1
 
 async def test_audit_syslog_noauth(manager: ManagerClient):
     """Syslog backend, no auth, single node."""
-    t = TestCQLAudit(manager)
+    t = CQLAuditTester(manager)
     Syslog = functools.partial(AuditBackendSyslog, socket_path=syslog_socket_path)
     await t.test_using_non_existent_keyspace(Syslog)
     await t.test_audit_keyspace(Syslog)
@@ -1869,7 +1869,7 @@ async def test_audit_syslog_noauth(manager: ManagerClient):
 
 async def test_audit_syslog_auth(manager: ManagerClient):
     """Syslog backend, auth enabled, single node."""
-    t = TestCQLAudit(manager)
+    t = CQLAuditTester(manager)
     Syslog = functools.partial(AuditBackendSyslog, socket_path=syslog_socket_path)
     await t.test_user_password_masking(Syslog)
     await t.test_role_password_masking(Syslog)
@@ -1880,7 +1880,7 @@ async def test_audit_syslog_auth(manager: ManagerClient):
 
 async def test_audit_composite_noauth(manager: ManagerClient):
     """Composite backend (table+syslog), no auth, single node."""
-    t = TestCQLAudit(manager)
+    t = CQLAuditTester(manager)
     Composite = functools.partial(AuditBackendComposite, socket_path=syslog_socket_path)
     await t.test_using_non_existent_keyspace(Composite)
     await t.test_audit_keyspace(Composite)
@@ -1897,7 +1897,7 @@ async def test_audit_composite_noauth(manager: ManagerClient):
 
 async def test_audit_composite_auth(manager: ManagerClient):
     """Composite backend (table+syslog), auth enabled, single node."""
-    t = TestCQLAudit(manager)
+    t = CQLAuditTester(manager)
     Composite = functools.partial(AuditBackendComposite, socket_path=syslog_socket_path)
     await t.test_user_password_masking(Composite)
     await t.test_role_password_masking(Composite)
@@ -1909,29 +1909,29 @@ _composite = functools.partial(AuditBackendComposite, socket_path=syslog_socket_
 
 
 @pytest.mark.parametrize("helper_class,config_changer", [
-    pytest.param(AuditBackendTable, TestCQLAudit.AuditSighupConfigChanger, id="table-sighup"),
-    pytest.param(AuditBackendTable, TestCQLAudit.AuditCqlConfigChanger, id="table-cql"),
-    pytest.param(_syslog, TestCQLAudit.AuditSighupConfigChanger, id="syslog-sighup"),
-    pytest.param(_syslog, TestCQLAudit.AuditCqlConfigChanger, id="syslog-cql"),
-    pytest.param(_composite, TestCQLAudit.AuditSighupConfigChanger, id="composite-sighup"),
-    pytest.param(_composite, TestCQLAudit.AuditCqlConfigChanger, id="composite-cql"),
+    pytest.param(AuditBackendTable, CQLAuditTester.AuditSighupConfigChanger, id="table-sighup"),
+    pytest.param(AuditBackendTable, CQLAuditTester.AuditCqlConfigChanger, id="table-cql"),
+    pytest.param(_syslog, CQLAuditTester.AuditSighupConfigChanger, id="syslog-sighup"),
+    pytest.param(_syslog, CQLAuditTester.AuditCqlConfigChanger, id="syslog-cql"),
+    pytest.param(_composite, CQLAuditTester.AuditSighupConfigChanger, id="composite-sighup"),
+    pytest.param(_composite, CQLAuditTester.AuditCqlConfigChanger, id="composite-cql"),
 ])
 async def test_config_no_liveupdate(manager: ManagerClient, helper_class, config_changer):
     """Non-live audit config params (audit, audit_unix_socket_path, audit_syslog_write_buffer_size) must be unmodifiable."""
-    await TestCQLAudit(manager).test_config_no_liveupdate(helper_class, config_changer)
+    await CQLAuditTester(manager).test_config_no_liveupdate(helper_class, config_changer)
 
 
 @pytest.mark.parametrize("helper_class,config_changer", [
-    pytest.param(AuditBackendTable, TestCQLAudit.AuditSighupConfigChanger, id="table-sighup"),
-    pytest.param(AuditBackendTable, TestCQLAudit.AuditCqlConfigChanger, id="table-cql"),
-    pytest.param(_syslog, TestCQLAudit.AuditSighupConfigChanger, id="syslog-sighup"),
-    pytest.param(_syslog, TestCQLAudit.AuditCqlConfigChanger, id="syslog-cql"),
-    pytest.param(_composite, TestCQLAudit.AuditSighupConfigChanger, id="composite-sighup"),
-    pytest.param(_composite, TestCQLAudit.AuditCqlConfigChanger, id="composite-cql"),
+    pytest.param(AuditBackendTable, CQLAuditTester.AuditSighupConfigChanger, id="table-sighup"),
+    pytest.param(AuditBackendTable, CQLAuditTester.AuditCqlConfigChanger, id="table-cql"),
+    pytest.param(_syslog, CQLAuditTester.AuditSighupConfigChanger, id="syslog-sighup"),
+    pytest.param(_syslog, CQLAuditTester.AuditCqlConfigChanger, id="syslog-cql"),
+    pytest.param(_composite, CQLAuditTester.AuditSighupConfigChanger, id="composite-sighup"),
+    pytest.param(_composite, CQLAuditTester.AuditCqlConfigChanger, id="composite-cql"),
 ])
 async def test_config_liveupdate(manager: ManagerClient, helper_class, config_changer):
     """Live-updatable audit config params (categories, keyspaces, tables) must be modifiable at runtime."""
-    await TestCQLAudit(manager).test_config_liveupdate(helper_class, config_changer)
+    await CQLAuditTester(manager).test_config_liveupdate(helper_class, config_changer)
 
 
 @pytest.mark.parametrize("helper_class", [
@@ -1941,4 +1941,4 @@ async def test_config_liveupdate(manager: ManagerClient, helper_class, config_ch
 ])
 async def test_parallel_syslog_audit(manager: ManagerClient, helper_class):
     """Cluster must not fail when multiple queries are audited in parallel."""
-    await TestCQLAudit(manager).test_parallel_syslog_audit(helper_class)
+    await CQLAuditTester(manager).test_parallel_syslog_audit(helper_class)
