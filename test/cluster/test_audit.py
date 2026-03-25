@@ -511,7 +511,6 @@ class AuditBackendComposite(AuditBackend):
         return rows_dict
 
 
-@pytest.mark.single_node
 class TestCQLAudit(AuditTester):
     """
     Make sure CQL statements are audited
