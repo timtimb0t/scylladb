@@ -699,6 +699,17 @@ future<executor::request_return_type> server::handle_api_request(std::unique_ptr
         // for such a size.
         co_return api_error::payload_too_large(fmt::format("Request content length limit of {} bytes exceeded", request_content_length_limit));
     }
+    // Check the concurrency limit early, before acquiring memory and
+    // reading the request body, to avoid piling up memory from excess
+    // requests that will be rejected anyway. This mirrors the CQL
+    // transport which also checks concurrency before memory acquisition
+    // (transport/server.cc).
+    if (_pending_requests.get_count() >= _max_concurrent_requests) {
+        _executor._stats.requests_shed++;
+        co_return api_error::request_limit_exceeded(format("too many in-flight requests (configured via max_concurrent_requests_per_shard): {}", _pending_requests.get_count()));
+    }
+    _pending_requests.enter();
+    auto leave = defer([this] () noexcept { _pending_requests.leave(); });
     // JSON parsing can allocate up to roughly 2x the size of the raw
     // document, + a couple of bytes for maintenance.
     // If the Content-Length of the request is not available, we assume
@@ -760,12 +771,6 @@ future<executor::request_return_type> server::handle_api_request(std::unique_ptr
         _executor._stats.unsupported_operations++;
         co_return api_error::unknown_operation(fmt::format("Unsupported operation {}", op));
     }
-    if (_pending_requests.get_count() >= _max_concurrent_requests) {
-        _executor._stats.requests_shed++;
-        co_return api_error::request_limit_exceeded(format("too many in-flight requests (configured via max_concurrent_requests_per_shard): {}", _pending_requests.get_count()));
-    }
-    _pending_requests.enter();
-    auto leave = defer([this] () noexcept { _pending_requests.leave(); });
     executor::client_state client_state(service::client_state::external_tag(),
         _auth_service, &_sl_controller, _timeout_config.current_values(), req->get_client_address());
     if (!username.empty()) {
