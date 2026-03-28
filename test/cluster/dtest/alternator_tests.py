@@ -481,12 +481,14 @@ class TesterAlternator(BaseAlternator):
         2) Issue Alternator 'heavy' requests concurrently (create-table)
         3) wait for RequestLimitExceeded error response.
         """
-        concurrent_requests_limit = 5
+        # Keep the limit low to avoid exhausting LSA memory on the 1GB test node
+        # when multiple CreateTable requests (Raft + schema + flush) run concurrently.
+        concurrent_requests_limit = 3
         extra_config = {"max_concurrent_requests_per_shard": concurrent_requests_limit, "num_tokens": 1}
         self.prepare_dynamodb_cluster(num_of_nodes=1, extra_config=extra_config)
         node1 = self.cluster.nodelist()[0]
         create_tables_threads = []
-        for tables_num in range(concurrent_requests_limit * 5):
+        for tables_num in range(concurrent_requests_limit * 2):
             create_tables_threads.append(self.run_create_table_thread())
 
         @retrying(num_attempts=150, sleep_time=0.2, allowed_exceptions=ConcurrencyLimitNotExceededError, message="Running create-table request")
