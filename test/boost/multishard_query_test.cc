@@ -1045,7 +1045,6 @@ validate_result_size(size_t i, schema_ptr schema, const utils::chunked_vector<mu
 
 struct fuzzy_test_config {
     uint32_t seed;
-    std::chrono::seconds timeout;
     unsigned concurrency;
     unsigned scans;
 };
@@ -1077,6 +1076,9 @@ run_fuzzy_test_scan(size_t i, fuzzy_test_config cfg, sharded<replica::database>&
     testlog.debug("[scan#{}]: seed={}, is_stateful={}, prange={}, ckranges={}", i, seed, is_stateful, partition_range,
             partition_slice.default_row_ranges());
 
+    // Use a small max_size to force many pages per scan, stressing the
+    // paging and result-merging logic.  With the large row limit here,
+    // the byte limit is typically the tighter bound.
     const auto [results, npages] = read_partitions_with_paged_scan(db, schema, 1000, 1024, is_stateful, partition_range, partition_slice);
 
     const auto expected_partitions = slice_partitions(*schema, mutations, partition_index_range, partition_slice);
@@ -1173,14 +1175,14 @@ SEASTAR_THREAD_TEST_CASE(fuzzy_test) {
                 tests::default_timestamp_generator());
 
 #if defined DEBUG
-        auto cfg = fuzzy_test_config{seed, std::chrono::seconds{8}, 1, 1};
+        auto cfg = fuzzy_test_config{seed, 1, 1};
 #elif defined DEVEL
-        auto cfg = fuzzy_test_config{seed, std::chrono::seconds{2}, 2, 4};
+        auto cfg = fuzzy_test_config{seed, 2, 4};
 #else
-        auto cfg = fuzzy_test_config{seed, std::chrono::seconds{2}, 4, 8};
+        auto cfg = fuzzy_test_config{seed, 4, 8};
 #endif
 
-        testlog.info("Running test workload with configuration: seed={}, timeout={}s, concurrency={}, scans={}", cfg.seed, cfg.timeout.count(),
+        testlog.info("Running test workload with configuration: seed={}, concurrency={}, scans={}", cfg.seed,
                 cfg.concurrency, cfg.scans);
 
         smp::invoke_on_all([cfg, db = &env.db(), gs = global_schema_ptr(tbl.schema), &compacted_frozen_mutations = tbl.compacted_frozen_mutations] {
