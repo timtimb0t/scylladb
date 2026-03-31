@@ -1160,9 +1160,15 @@ SEASTAR_THREAD_TEST_CASE(fuzzy_test) {
                 std::uniform_int_distribution<size_t>(0, 100), // clustering-rows
                 std::uniform_int_distribution<size_t>(0, 100), // range-tombstones
 #else
+                // Keep these values moderate: with complex randomly-generated
+                // schemas (deeply nested frozen collections/UDTs), large row
+                // counts cause data generation and paged scanning to be very
+                // slow, leading to CI timeouts. The test's value comes from
+                // schema variety and paging correctness, not from sheer data
+                // volume.
                 std::uniform_int_distribution<size_t>(32, 64), // partitions
-                std::uniform_int_distribution<size_t>(0, 1000), // clustering-rows
-                std::uniform_int_distribution<size_t>(0, 1000), // range-tombstones
+                std::uniform_int_distribution<size_t>(0, 200), // clustering-rows
+                std::uniform_int_distribution<size_t>(0, 200), // range-tombstones
 #endif
                 tests::default_timestamp_generator());
 
