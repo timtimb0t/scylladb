@@ -274,6 +274,30 @@ class TesterAlternator(BaseAlternator):
         logger.info("Testing and validating an update query using key condition expression")
         logger.info(f"ConditionExpression update of short circuit is: {conditional_update_short_circuit}")
         dc2_table.update_item(**conditional_update_short_circuit)
+        # Wait for cross-DC replication to reach both live DC1 nodes
+        # before stopping dc2_node.  The LWT commit uses LOCAL_QUORUM,
+        # which only guarantees DC2 persistence; replication to DC1 is
+        # async background work.  Without this wait, stopping dc2_node
+        # can drop in-flight RPCs to DC1 while CAS mutations don't
+        # store hints.  We must confirm both live DC1 replicas have the
+        # data so that the later ConsistentRead=True (LOCAL_QUORUM)
+        # read on restarted node1 is guaranteed to succeed.
+        # See https://scylladb.atlassian.net/browse/SCYLLADB-1267
+        dc1_live_nodes = [
+            node for node in self.cluster.nodelist()
+            if node.data_center == node1.data_center and node.server_id != node1.server_id
+        ]
+        dc1_live_tables = [self.get_table(table_name=TABLE_NAME, node=node) for node in dc1_live_nodes]
+        wait_for(
+            lambda: all(
+                t.get_item(
+                    Key={self._table_primary_key: new_pk_val}, ConsistentRead=False
+                ).get("Item", {}).get("c") == 3
+                for t in dc1_live_tables
+            ),
+            timeout=60,
+            text="Waiting for cross-DC replication of conditional update to both live DC1 nodes",
+        )
         dc2_node.stop()
         node1.start()
 
