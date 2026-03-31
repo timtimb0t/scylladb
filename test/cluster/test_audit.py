@@ -33,7 +33,6 @@ from test.cluster.dtest.dtest_class import create_ks, wait_for
 from test.cluster.dtest.tools.assertions import assert_invalid
 from test.cluster.dtest.tools.data import rows_to_list, run_in_parallel
 
-from test.cluster.test_config import wait_for_config
 from test.pylib.manager_client import ManagerClient
 from test.pylib.rest_client import read_barrier
 
@@ -113,11 +112,10 @@ class AuditTester:
                 for k in AUTH_CONFIG:
                     await self.manager.server_remove_config_option(srv.server_id, k)
 
-            # Remove absent keys so the server reverts to compiled-in defaults.
-            for k in absent_keys:
-                await self.manager.server_remove_config_option(srv.server_id, k)
-
             if needs_restart:
+                # Remove absent keys so the server reverts to compiled-in defaults.
+                for k in absent_keys:
+                    await self.manager.server_remove_config_option(srv.server_id, k)
                 await self.manager.server_stop_gracefully(srv.server_id)
                 full_cfg = self._build_server_config(needed, enable_compact_storage, user)
                 await self.manager.server_update_config(srv.server_id, config_options=full_cfg)
@@ -127,10 +125,17 @@ class AuditTester:
                 # Server stays up — only push live-updatable keys.
                 live_cfg = {k: v for k, v in needed.items() if k in LIVE_AUDIT_KEYS}
                 live_cfg["enable_create_table_with_compact_storage"] = enable_compact_storage
+                log_file = await self.manager.server_open_log(srv.server_id)
+                # Each remove/update sends a SIGHUP.  Wait for each one's
+                # "completed re-reading configuration file" before the next
+                # so we never match a stale message.
+                for k in absent_keys:
+                    from_mark = await log_file.mark()
+                    await self.manager.server_remove_config_option(srv.server_id, k)
+                    await log_file.wait_for(r"completed re-reading configuration file", from_mark=from_mark, timeout=60)
+                from_mark = await log_file.mark()
                 await self.manager.server_update_config(srv.server_id, config_options=live_cfg)
-                for key in LIVE_AUDIT_KEYS:
-                    if key in live_cfg:
-                        await wait_for_config(self.manager, srv, key, live_cfg[key])
+                await log_file.wait_for(r"completed re-reading configuration file", from_mark=from_mark, timeout=60)
 
     async def _start_fresh_servers(self, needed: dict[str, str],
                                    enable_compact_storage: bool,
