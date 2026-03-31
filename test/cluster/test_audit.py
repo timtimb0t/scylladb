@@ -345,7 +345,7 @@ class UnixSockerListener:
                 elif data != "Initializing syslog audit backend.":
                     self.server.parent_instance.lines.append(data)
 
-    class UnixDatagramServer(socketserver.ThreadingUnixDatagramServer):
+    class UnixDatagramServer(socketserver.UnixDatagramServer):
         def __init__(self, socket_path, handler, parent_instance, lock):
             self.parent_instance = parent_instance
             self.mutex = lock
