@@ -154,7 +154,7 @@ future<> view_building_worker::do_drain() {
     if (!_as.abort_requested()) {
         _as.request_abort();
     }
-    _state._mutex.broken();
+    co_await _staging_sstables_mutex.wait();
     _staging_sstables_mutex.broken();
     _sstables_to_register_event.broken();
     if (this_shard_id() == 0) {
@@ -164,6 +164,8 @@ future<> view_building_worker::do_drain() {
         co_await std::move(state_observer);
         co_await _mnotifier.unregister_listener(this);
     }
+    co_await _state._mutex.wait();
+    _state._mutex.broken();
     co_await _state.clear();
     co_await uninit_messaging_service();
 }
