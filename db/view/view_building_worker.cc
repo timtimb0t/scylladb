@@ -166,7 +166,7 @@ future<> view_building_worker::do_drain() {
     }
     co_await _state._mutex.wait();
     _state._mutex.broken();
-    co_await _state.clear();
+    co_await _state.drain();
     co_await uninit_messaging_service();
 }
 
@@ -495,6 +495,10 @@ future<> view_building_worker::state::clean_up_after_batch() {
 
 // Flush base table, set is as currently processing base table and save which views exist at the time of flush
 future<> view_building_worker::state::flush_base_table(replica::database& db, table_id base_table_id, abort_source& as) {
+    if (_drained) {
+        on_internal_error(vbw_logger, "view_building_worker::state was already drained");
+    }
+
     auto cf = db.find_column_family(base_table_id).shared_from_this();
     co_await when_all(cf->await_pending_writes(), cf->await_pending_streams());
     co_await flush_base(cf, as);
@@ -511,6 +515,11 @@ future<> view_building_worker::state::clear() {
     processing_base_table.reset();
     completed_tasks.clear();
     flushed_views.clear();
+}
+
+future<> view_building_worker::state::drain() {
+    _drained = true;
+    co_await clear();
 }
 
 view_building_worker::batch::batch(sharded<view_building_worker>& vbw, std::unordered_map<utils::UUID, view_building_task> tasks, table_id base_id, locator::tablet_replica replica)
