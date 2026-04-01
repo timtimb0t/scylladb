@@ -470,6 +470,16 @@ static std::unordered_set<table_id> get_ids_of_all_views(replica::database& db, 
     }) | std::ranges::to<std::unordered_set>();;
 }
 
+void view_building_worker::state::start_batch(std::unique_ptr<batch> batch) {
+    if (_drained) {
+        on_internal_error(vbw_logger, "view_building_worker::state was already drained");
+    } else if (_batch) {
+        on_internal_error(vbw_logger, fmt::format("view_building_worker::state::start_batch(): some batch (tasks: {}) is already running", _batch->tasks | std::views::keys));
+    }
+    _batch = std::move(batch);
+    _batch->start();
+}
+
 // If `state::processing_base_table` is different that the `view_building_state::currently_processed_base_table`,
 // clear the state, save and flush new base table
 future<> view_building_worker::state::update_processing_base_table(replica::database& db, const view_building_state& building_state, abort_source& as) {
@@ -818,8 +828,8 @@ future<std::vector<utils::UUID>> view_building_worker::work_on_tasks(raft::term_
         }
 
         // Create and start the batch
-        _state._batch = std::make_unique<batch>(container(), std::move(tasks), *building_state.currently_processed_base_table, my_replica);
-        _state._batch->start();
+        auto batch = std::make_unique<view_building_worker::batch>(container(), std::move(tasks), *building_state.currently_processed_base_table, my_replica);
+        _state.start_batch(std::move(batch));
     }
 
     if (std::ranges::all_of(ids, [&] (auto& id) { return !_state._batch->tasks.contains(id); })) {

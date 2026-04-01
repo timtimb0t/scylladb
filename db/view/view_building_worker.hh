@@ -100,6 +100,7 @@ class view_building_worker : public seastar::peering_sharded_service<view_buildi
         semaphore _mutex = semaphore(1);
         bool _drained = false;
         // All of the methods below should be executed while holding `_mutex` unit!
+        void start_batch(std::unique_ptr<batch> batch);
         future<> update_processing_base_table(replica::database& db, const view_building_state& building_state, abort_source& as);
         future<> flush_base_table(replica::database& db, table_id base_table_id, abort_source& as);
         future<> clean_up_after_batch();
