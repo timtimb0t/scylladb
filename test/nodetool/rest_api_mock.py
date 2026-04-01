@@ -257,7 +257,7 @@ async def run_server(ip, port):
 
     runner = aiohttp.web.AppRunner(app)
     await runner.setup()
-    site = aiohttp.web.TCPSite(runner, ip, port)
+    site = aiohttp.web.TCPSite(runner, ip, port, reuse_address=True, reuse_port=True)
     await site.start()
 
     try:
