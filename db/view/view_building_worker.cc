@@ -143,6 +143,14 @@ dht::token_range view_building_worker::get_tablet_token_range(table_id table_id,
 }
 
 future<> view_building_worker::drain() {
+    auto drain_started = std::exchange(_drain_started, started_drain::yes);
+    if (drain_started == started_drain::no) {
+        _drain_finished = shared_future(do_drain());
+    }
+    return _drain_finished.get_future();
+}
+
+future<> view_building_worker::do_drain() {
     if (!_as.abort_requested()) {
         _as.request_abort();
     }

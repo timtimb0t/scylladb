@@ -177,6 +177,11 @@ private:
     void init_messaging_service();
     future<> uninit_messaging_service();
     future<std::vector<utils::UUID>> work_on_tasks(raft::term_t term, std::vector<utils::UUID> ids);
+
+    using started_drain = bool_class<struct started_drain_tag>;
+    started_drain _drain_started = started_drain::no;
+    shared_future<> _drain_finished;
+    future<> do_drain();
 };
 
 }
