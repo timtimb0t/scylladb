@@ -164,7 +164,7 @@ SEASTAR_TEST_CASE(roles_table_is_protected) {
 }
 
 SEASTAR_TEST_CASE(role_members_table_is_protected) {
-    return do_with_cql_env_thread([] (cql_test_env& env) {
+    co_await do_with_cql_env_thread([] (cql_test_env& env) {
         require_table_protected(env, "system.role_members");
     }, auth_on());
 }
