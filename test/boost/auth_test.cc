@@ -336,7 +336,7 @@ SEASTAR_TEST_CASE(test_try_to_create_role_with_hashed_password_and_password) {
 }
 
 SEASTAR_TEST_CASE(test_try_to_create_role_with_password_and_hashed_password) {
-    return do_with_cql_env_thread([] (cql_test_env& env) {
+    co_await do_with_cql_env_thread([] (cql_test_env& env) {
         BOOST_REQUIRE_THROW(
             env.execute_cql("CREATE ROLE jane WITH PASSWORD = 'something' AND HASHED PASSWORD = 'something'").get(),
             exceptions::syntax_exception);
