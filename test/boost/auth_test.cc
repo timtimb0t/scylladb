@@ -387,7 +387,7 @@ SEASTAR_TEST_CASE(test_create_roles_with_hashed_password_and_log_in) {
 }
 
 SEASTAR_TEST_CASE(test_try_login_after_creating_roles_with_hashed_password) {
-    return do_with_cql_env_thread([] (cql_test_env& env) {
+    co_await do_with_cql_env_thread([] (cql_test_env& env) {
         // Note: crypt(5) specifies:
         //
         //    "Hashed passphrases are always entirely printable ASCII, and do not contain any whitespace
