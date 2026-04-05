@@ -176,7 +176,7 @@ SEASTAR_TEST_CASE(role_permissions_table_is_protected) {
 }
 
 SEASTAR_TEST_CASE(test_alter_with_timeouts) {
-    return do_with_cql_env_thread([] (cql_test_env& e) {
+    co_await do_with_cql_env_thread([] (cql_test_env& e) {
         cquery_nofail(e, "CREATE ROLE user1 WITH PASSWORD = 'pass' AND LOGIN = true");
         cquery_nofail(e, "CREATE ROLE user2 WITH PASSWORD = 'pass' AND LOGIN = true");
         cquery_nofail(e, "CREATE ROLE user3 WITH PASSWORD = 'pass' AND LOGIN = true");
