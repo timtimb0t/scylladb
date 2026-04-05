@@ -86,57 +86,57 @@ SEASTAR_TEST_CASE(test_password_authenticator_operations) {
         BOOST_REQUIRE_THROW(authenticate(env, username, password).get(),
                 exceptions::authentication_exception);
 
-                cquery_nofail(env, format("CREATE ROLE {} WITH PASSWORD = '{}' AND LOGIN = true", username, password));
+        cquery_nofail(env, format("CREATE ROLE {} WITH PASSWORD = '{}' AND LOGIN = true", username, password));
 
-                auto user = authenticate(env, username, password).get();
-                BOOST_REQUIRE(!auth::is_anonymous(user));
-                BOOST_REQUIRE_EQUAL(*user.name, username);
+        auto user = authenticate(env, username, password).get();
+        BOOST_REQUIRE(!auth::is_anonymous(user));
+        BOOST_REQUIRE_EQUAL(*user.name, username);
 
         BOOST_REQUIRE_THROW(authenticate(env, username, "hejkotte").get(),
                 exceptions::authentication_exception);
 
-            //
-            // A role must be explicitly marked as being allowed to log in.
-            //
+        //
+        // A role must be explicitly marked as being allowed to log in.
+        //
 
-                    do_with_mc(env, [&env] (auto& mc) {
-                        auth::authentication_options opts;
-                        auth::role_config_update conf;
-                        conf.can_login = false;
-                        auth::alter_role(env.local_auth_service(), username, conf, opts, mc).get();
-                    });
-                    // has to be in a separate transaction to observe results of alter role
-                    do_with_mc(env, [&env] (auto& mc) {
-                        BOOST_REQUIRE_THROW(authenticate(env, username, password).get(),
-                                exceptions::authentication_exception);
-                    });
+        do_with_mc(env, [&env] (auto& mc) {
+            auth::authentication_options opts;
+            auth::role_config_update conf;
+            conf.can_login = false;
+            auth::alter_role(env.local_auth_service(), username, conf, opts, mc).get();
+        });
+        // has to be in a separate transaction to observe results of alter role
+        do_with_mc(env, [&env] (auto& mc) {
+            BOOST_REQUIRE_THROW(authenticate(env, username, password).get(),
+                    exceptions::authentication_exception);
+        });
 
-            // sasl
-            auto& a = env.local_auth_service().underlying_authenticator();
-            auto sasl = a.new_sasl_challenge();
+        // sasl
+        auto& a = env.local_auth_service().underlying_authenticator();
+        auto sasl = a.new_sasl_challenge();
 
-            BOOST_REQUIRE(!sasl->is_complete());
+        BOOST_REQUIRE(!sasl->is_complete());
 
-            bytes b;
-            int8_t i = 0;
-            b.append(&i, 1);
-            b.insert(b.end(), username.begin(), username.end());
-            b.append(&i, 1);
-            b.insert(b.end(), password.begin(), password.end());
+        bytes b;
+        int8_t i = 0;
+        b.append(&i, 1);
+        b.insert(b.end(), username.begin(), username.end());
+        b.append(&i, 1);
+        b.insert(b.end(), password.begin(), password.end());
 
-            sasl->evaluate_response(b);
-            BOOST_REQUIRE(sasl->is_complete());
+        sasl->evaluate_response(b);
+        BOOST_REQUIRE(sasl->is_complete());
 
-            auto sasl_user = sasl->get_authenticated_user().get();
-            BOOST_REQUIRE(!auth::is_anonymous(sasl_user));
-            BOOST_REQUIRE_EQUAL(*sasl_user.name, username);
+        auto sasl_user = sasl->get_authenticated_user().get();
+        BOOST_REQUIRE(!auth::is_anonymous(sasl_user));
+        BOOST_REQUIRE_EQUAL(*sasl_user.name, username);
 
-            // check deleted user
-                do_with_mc(env, [&env] (auto& mc) {
-                    auth::drop_role(env.local_auth_service(), username, mc).get();
-                    BOOST_REQUIRE_THROW(authenticate(env, username, password).get(),
-                            exceptions::authentication_exception);
-                });
+        // check deleted user
+        do_with_mc(env, [&env] (auto& mc) {
+            auth::drop_role(env.local_auth_service(), username, mc).get();
+            BOOST_REQUIRE_THROW(authenticate(env, username, password).get(),
+                    exceptions::authentication_exception);
+        });
     }, auth_on(false));
 }
 
