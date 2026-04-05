@@ -77,52 +77,28 @@ authenticate(cql_test_env& env, std::string_view username, std::string_view pass
     });
 }
 
-template <typename Exception, typename... Args>
-future<> require_throws(seastar::future<Args...> fut) {
-    return fut.then_wrapped([](auto completed_fut) {
-        try {
-            completed_fut.get();
-            BOOST_FAIL("Required an exception to be thrown");
-        } catch (const Exception&) {
-            // Ok.
-        }
-    });
-}
-
 SEASTAR_TEST_CASE(test_password_authenticator_operations) {
-    /**
-     * Not using seastar::async due to apparent ASan bug.
-     * Enjoy the slightly less readable code.
-     */
-    return do_with_cql_env([](cql_test_env& env) {
+    co_await do_with_cql_env_thread([](cql_test_env& env) {
         static const sstring username("fisk");
         static const sstring password("notter");
 
         // check non-existing user
-        return require_throws<exceptions::authentication_exception>(
-            authenticate(env, username, password)).then([&env] {
-            return seastar::async([&env] () {
+        BOOST_REQUIRE_THROW(authenticate(env, username, password).get(),
+                exceptions::authentication_exception);
+
                 cquery_nofail(env, format("CREATE ROLE {} WITH PASSWORD = '{}' AND LOGIN = true", username, password));
-            }).then([&env] () {
-                return authenticate(env, username, password);
-            }).then([] (auth::authenticated_user user) {
+
+                auto user = authenticate(env, username, password).get();
                 BOOST_REQUIRE(!auth::is_anonymous(user));
                 BOOST_REQUIRE_EQUAL(*user.name, username);
-            });
-        }).then([&env] {
-            return require_throws<exceptions::authentication_exception>(authenticate(env, username, "hejkotte"));
-        }).then([&env] {
+
+        BOOST_REQUIRE_THROW(authenticate(env, username, "hejkotte").get(),
+                exceptions::authentication_exception);
+
             //
             // A role must be explicitly marked as being allowed to log in.
             //
 
-            return do_with(
-                    auth::role_config_update{},
-                    auth::authentication_options{},
-                    [&env](auto& config_update, const auto& options) {
-                config_update.can_login = false;
-
-                return seastar::async([&env] {
                     do_with_mc(env, [&env] (auto& mc) {
                         auth::authentication_options opts;
                         auth::role_config_update conf;
@@ -131,11 +107,10 @@ SEASTAR_TEST_CASE(test_password_authenticator_operations) {
                     });
                     // has to be in a separate transaction to observe results of alter role
                     do_with_mc(env, [&env] (auto& mc) {
-                        require_throws<exceptions::authentication_exception>(authenticate(env, username, password)).get();
+                        BOOST_REQUIRE_THROW(authenticate(env, username, password).get(),
+                                exceptions::authentication_exception);
                     });
-                });
-            });
-        }).then([&env] {
+
             // sasl
             auto& a = env.local_auth_service().underlying_authenticator();
             auto sasl = a.new_sasl_challenge();
@@ -152,19 +127,16 @@ SEASTAR_TEST_CASE(test_password_authenticator_operations) {
             sasl->evaluate_response(b);
             BOOST_REQUIRE(sasl->is_complete());
 
-            return sasl->get_authenticated_user().then([](auth::authenticated_user user) {
-                BOOST_REQUIRE(!auth::is_anonymous(user));
-                BOOST_REQUIRE_EQUAL(*user.name, username);
-            });
-        }).then([&env] {
+            auto sasl_user = sasl->get_authenticated_user().get();
+            BOOST_REQUIRE(!auth::is_anonymous(sasl_user));
+            BOOST_REQUIRE_EQUAL(*sasl_user.name, username);
+
             // check deleted user
-            return seastar::async([&env] {
                 do_with_mc(env, [&env] (auto& mc) {
                     auth::drop_role(env.local_auth_service(), username, mc).get();
-                    require_throws<exceptions::authentication_exception>(authenticate(env, username, password)).get();
+                    BOOST_REQUIRE_THROW(authenticate(env, username, password).get(),
+                            exceptions::authentication_exception);
                 });
-            });
-        });
     }, auth_on(false));
 }
 
