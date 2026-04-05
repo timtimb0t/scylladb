@@ -356,7 +356,7 @@ SEASTAR_TEST_CASE(test_create_roles_with_hashed_password_and_log_in) {
     // This test ensures that Scylla allows for creating roles with hashed passwords
     // following the format of one of the supported algorithms, as well as logging in
     // as that role is performed successfully.
-    return do_with_cql_env_thread([] (cql_test_env& env) {
+    co_await do_with_cql_env_thread([] (cql_test_env& env) {
         // Pairs of form (password, hashed password).
         constexpr std::pair<std::string_view, std::string_view> passwords[] = {
             // bcrypt's.
