@@ -404,7 +404,7 @@ SEASTAR_TEST_CASE(test_try_login_after_creating_roles_with_hashed_password) {
 }
 
 SEASTAR_TEST_CASE(test_try_describe_schema_with_internals_and_passwords_as_anonymous_user) {
-    return do_with_cql_env_thread([] (cql_test_env& env) {
+    co_await do_with_cql_env_thread([] (cql_test_env& env) {
         env.local_client_state().set_login(auth::anonymous_user());
         env.refresh_client_state().get();
         BOOST_REQUIRE(auth::is_anonymous(*env.local_client_state().user()));
