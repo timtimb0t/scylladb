@@ -11,6 +11,7 @@
 #include <optional>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/when_any.hh>
+#include <seastar/util/backtrace.hh>
 #include "raft_group0_client.hh"
 #include "raft_group_registry.hh"
 
@@ -99,6 +100,9 @@ static logging::logger logger("group0_client");
  * for improving liveness of operations running on the same node by serializing them.
  */
 struct group0_guard::impl {
+    static thread_local uint64_t _next_id;
+    uint64_t _id;
+
     semaphore_units<> _operation_mutex_holder;
     semaphore_units<> _read_apply_mutex_holder;
 
@@ -112,16 +116,29 @@ struct group0_guard::impl {
     impl& operator=(const impl&) = delete;
 
     impl(semaphore_units<> operation_mutex_holder, semaphore_units<> read_apply_mutex_holder, utils::UUID observed_group0_state_id, utils::UUID new_group0_state_id, rwlock::holder upgrade_lock_holder, bool raft_enabled)
-        : _operation_mutex_holder(std::move(operation_mutex_holder)), _read_apply_mutex_holder(std::move(read_apply_mutex_holder))
+        : _id(_next_id++)
+        , _operation_mutex_holder(std::move(operation_mutex_holder)), _read_apply_mutex_holder(std::move(read_apply_mutex_holder))
         , _observed_group0_state_id(observed_group0_state_id), _new_group0_state_id(new_group0_state_id)
         , _upgrade_lock_holder(std::move(upgrade_lock_holder)), _raft_enabled(raft_enabled)
-    {}
+    {
+        logger.info("guard #{} created: read_apply_mutex count={}, raft_enabled={}, at: {}",
+            _id, _read_apply_mutex_holder.count(), _raft_enabled, seastar::current_backtrace());
+    }
+
+    ~impl() {
+        logger.info("guard #{} destroyed: read_apply_mutex count={}, at: {}",
+            _id, _read_apply_mutex_holder.count(), seastar::current_backtrace());
+    }
 
     void release_read_apply_mutex() {
+        logger.info("guard #{} release_read_apply_mutex: count={}, at: {}",
+            _id, _read_apply_mutex_holder.count(), seastar::current_backtrace());
         SCYLLA_ASSERT(_read_apply_mutex_holder.count() == 1);
         _read_apply_mutex_holder.return_units(1);
     }
 };
+
+thread_local uint64_t group0_guard::impl::_next_id = 0;
 
 group0_guard::group0_guard(std::unique_ptr<impl> p) : _impl(std::move(p)) {}
 
