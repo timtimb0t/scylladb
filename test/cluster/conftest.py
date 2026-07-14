@@ -23,22 +23,23 @@ from test.pylib.random_tables import RandomTables
 from test.pylib.skip_types import skip_env
 from test.pylib.util import unique_name
 from test.pylib.manager_client import ManagerClient
+from test.cluster.fixture_params import ClusterConfig, KeyspaceConfig, TableConfig, TestSetup, FullSetupResult
 from test.pylib.async_cql import run_async
 from test.pylib.scylla_cluster import ScyllaClusterManager, ScyllaVersionDescription, get_scylla_2025_1_description
 from test.pylib.connect_options import add_cql_connection_options, add_s3_options
 from test.pylib.encryption_provider import KeyProvider, make_key_provider_factory
 import logging
 import pytest
-from cassandra.auth import PlainTextAuthProvider                         # type: ignore # pylint: disable=no-name-in-module
-from cassandra.cluster import Session                                    # type: ignore # pylint: disable=no-name-in-module
-from cassandra.cluster import Cluster, ConsistencyLevel                  # type: ignore # pylint: disable=no-name-in-module
-from cassandra.cluster import ExecutionProfile, EXEC_PROFILE_DEFAULT     # type: ignore # pylint: disable=no-name-in-module
-from cassandra.policies import ExponentialReconnectionPolicy             # type: ignore
-from cassandra.policies import RoundRobinPolicy                          # type: ignore
-from cassandra.policies import TokenAwarePolicy                          # type: ignore
-from cassandra.policies import WhiteListRoundRobinPolicy                 # type: ignore
-from cassandra.connection import DRIVER_NAME       # type: ignore # pylint: disable=no-name-in-module
-from cassandra.connection import DRIVER_VERSION    # type: ignore # pylint: disable=no-name-in-module
+from cassandra.auth import PlainTextAuthProvider
+from cassandra.cluster import Session
+from cassandra.cluster import Cluster, ConsistencyLevel
+from cassandra.cluster import ExecutionProfile, EXEC_PROFILE_DEFAULT
+from cassandra.policies import ExponentialReconnectionPolicy
+from cassandra.policies import RoundRobinPolicy
+from cassandra.policies import TokenAwarePolicy
+from cassandra.policies import WhiteListRoundRobinPolicy
+from cassandra.connection import DRIVER_NAME
+from cassandra.connection import DRIVER_VERSION
 from collections.abc import AsyncIterator
 
 if TYPE_CHECKING:
@@ -357,6 +358,128 @@ async def prepare_3_nodes_cluster(request, manager):
 async def prepare_3_racks_cluster(request, manager):
     if request.node.get_closest_marker("prepare_3_racks_cluster"):
         await manager.servers_add(3, auto_rack_dc="dc1")
+
+
+# ---------------------------------------------------------------------------
+# Parameterized fixtures (see test/cluster/fixture_params.py for dataclasses)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="function")
+def cluster_config(request) -> ClusterConfig:
+    """Resolve ClusterConfig from parametrize (indirect) or marker or default."""
+    if hasattr(request, "param") and isinstance(request.param, ClusterConfig):
+        return request.param
+
+    marker = request.node.get_closest_marker("cluster_config")
+    if marker:
+        return ClusterConfig(**marker.kwargs)
+
+    # Backward compat with existing markers
+    num_nodes = 3
+    auto_rack_dc = None
+    if request.node.get_closest_marker("prepare_3_racks_cluster"):
+        auto_rack_dc = "dc1"
+
+    return ClusterConfig(num_nodes=num_nodes, auto_rack_dc=auto_rack_dc)
+
+
+@pytest.fixture(scope="function")
+async def servers(manager: ManagerClient, cluster_config: ClusterConfig):
+    """Create a cluster according to ClusterConfig and return a list of ServerInfo."""
+    srv = await manager.servers_add(
+        cluster_config.num_nodes,
+        cmdline=cluster_config.cmdline or None,
+        config=cluster_config.config or None,
+        property_file=cluster_config.property_file or None,
+        auto_rack_dc=cluster_config.auto_rack_dc,
+    )
+    return srv
+
+
+@pytest.fixture(scope="function")
+def keyspace_config(request) -> KeyspaceConfig:
+    """Resolve KeyspaceConfig from parametrize (indirect) or markers or default."""
+    if hasattr(request, "param") and isinstance(request.param, KeyspaceConfig):
+        return request.param
+
+    marker = request.node.get_closest_marker("keyspace_config")
+    if marker:
+        return KeyspaceConfig(**marker.kwargs)
+
+    # Backward compat with existing markers
+    rf_marker = request.node.get_closest_marker("replication_factor")
+    rf = rf_marker.args[0] if rf_marker else 3
+
+    tablets_marker = request.node.get_closest_marker("enable_tablets")
+    tablets = tablets_marker.args[0] if tablets_marker else None
+
+    return KeyspaceConfig(replication_factor=rf, tablets=tablets)
+
+
+@pytest.fixture(scope="function")
+async def test_keyspace(manager: ManagerClient, servers, keyspace_config: KeyspaceConfig):
+    """Create a keyspace per KeyspaceConfig, drop it after the test.
+
+    Depends on `servers` to ensure the cluster is up before creating the keyspace.
+    """
+    from test.cluster.util import new_test_keyspace as _new_test_keyspace
+
+    opts = keyspace_config.build_opts()
+    async with _new_test_keyspace(manager, opts) as ks:
+        yield ks
+
+
+@pytest.fixture(scope="function")
+def table_config(request) -> TableConfig:
+    """Resolve TableConfig from parametrize (indirect) or default."""
+    if hasattr(request, "param") and isinstance(request.param, TableConfig):
+        return request.param
+
+    marker = request.node.get_closest_marker("table_config")
+    if marker:
+        return TableConfig(**marker.kwargs)
+
+    return TableConfig()
+
+
+@pytest.fixture(scope="function")
+async def test_table(manager: ManagerClient, test_keyspace: str, table_config: TableConfig):
+    """Create a table per TableConfig inside test_keyspace, drop it after the test."""
+    from test.cluster.util import new_test_table as _new_test_table
+
+    async with _new_test_table(manager, test_keyspace, table_config.schema,
+                               extra=table_config.extra) as table:
+        yield table
+
+
+@pytest.fixture(scope="function")
+def test_setup_config(request) -> TestSetup:
+    """Resolve composite TestSetup from parametrize (indirect) or default."""
+    if hasattr(request, "param") and isinstance(request.param, TestSetup):
+        return request.param
+    return TestSetup()
+
+
+@pytest.fixture(scope="function")
+async def full_setup(manager: ManagerClient, test_setup_config: TestSetup) -> AsyncIterator[FullSetupResult]:
+    """One-shot fixture: cluster + keyspace + table. Returns FullSetupResult."""
+    from test.cluster.util import new_test_keyspace as _new_test_keyspace
+    from test.cluster.util import new_test_table as _new_test_table
+
+    cfg = test_setup_config
+    srv = await manager.servers_add(
+        cfg.cluster.num_nodes,
+        cmdline=cfg.cluster.cmdline or None,
+        config=cfg.cluster.config or None,
+        property_file=cfg.cluster.property_file or None,
+        auto_rack_dc=cfg.cluster.auto_rack_dc,
+    )
+
+    opts = cfg.keyspace.build_opts()
+    async with _new_test_keyspace(manager, opts) as ks:
+        async with _new_test_table(manager, ks, cfg.table.schema,
+                                   extra=cfg.table.extra) as table:
+            yield FullSetupResult(servers=srv, keyspace=ks, table=table)
 
 
 @pytest.fixture(scope="function")
