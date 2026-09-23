@@ -55,6 +55,7 @@ class Outcome(StrEnum):
     maps *anything else* to a status its register model has no branch for —
     which it then reports as a linearizability violation.  So a wrong spelling
     here does not produce an error, it produces a fabricated bug in ScyllaDB.
+    ``test_porcupine_contract.py`` pins this down.
 
     (Jepsen calls the indeterminate outcome ``:info``; the checker calls it
     ``unknown``.  Same thing, different word.)
