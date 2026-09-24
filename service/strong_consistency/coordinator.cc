@@ -570,6 +570,9 @@ auto coordinator::query(schema_ptr schema,
                     co_return std::move(*redirect);
                 }
                 op_storage.emplace(std::move(get<operation_ctx>(result)));
+                logger.trace("query(): table {}.{}, tablet {}, group {}: serving a linearizable read here, replicas {}",
+                    schema->ks_name(), schema->cf_name(), op_storage->tablet_id,
+                    op_storage->raft_info.group_id, op_storage->replicas);
             }
             auto& op = *op_storage;
 
@@ -591,6 +594,8 @@ auto coordinator::query(schema_ptr schema,
                 co_return redirect_to_leader(*target, _groups_manager, op.raft_info.group_id);
             }
             if (auto* wait_for_leader = get_if<raft_server::need_wait_for_leader>(&disposition)) {
+                logger.trace("query(): table {}.{}, tablet {}, group {}: leader unknown, waiting for one",
+                    schema->ks_name(), schema->cf_name(), op.tablet_id, op.raft_info.group_id);
                 future<> f = co_await coroutine::as_future(std::move(wait_for_leader->future));
                 if (f.failed()) {
                     co_await coroutine::return_exception_ptr(filter_error(std::move(f).get_exception()));
@@ -617,8 +622,12 @@ auto coordinator::query(schema_ptr schema,
         co_await utils::get_local_injector().inject("sc_coordinator_wait_before_query_read_barrier",
             utils::wait_for_message(5min));
 
+        logger.trace("query(): table {}.{}, tablet {}, group {}: running read_barrier()",
+            schema->ks_name(), schema->cf_name(), op.tablet_id, op.raft_info.group_id);
         future<> f = co_await coroutine::as_future(op.raft_server.server().read_barrier(&aoe.abort_source()));
         if (f.failed()) {
+            logger.trace("query(): table {}.{}, tablet {}, group {}: read_barrier() failed",
+                schema->ks_name(), schema->cf_name(), op.tablet_id, op.raft_info.group_id);
             co_await coroutine::return_exception_ptr(filter_error(std::move(f).get_exception()));
         }
     }
