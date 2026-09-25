@@ -215,6 +215,11 @@ future<> raft_commitlog_replay_buffer::process_raft_replayed_items(replica::data
         // Track the term of the last committed entry to update the snapshot descriptor.
         std::optional<raft::term_t> last_committed_term;
 
+        // Committed configuration entries leave the log together with the commands,
+        // but they are not applied anywhere.
+        uint64_t dropped_configurations = 0;
+        raft::log_entry_ptr last_dropped_configuration;
+
         for (auto& entry : filtered.entries) {
             // Apply committed command entries to the memtables. It is safe not to append them
             // to the new commitlog, because the old commitlog (currently being replayed) will
@@ -229,6 +234,10 @@ future<> raft_commitlog_replay_buffer::process_raft_replayed_items(replica::data
 
             if (entry->idx <= commit_idx) {
                 last_committed_term = entry->term;
+                if (std::holds_alternative<raft::configuration>(entry->data)) {
+                    ++dropped_configurations;
+                    last_dropped_configuration = entry;
+                }
             }
 
             // Rewrite uncommitted entries to the new commitlog to obtain rp_handles
@@ -268,6 +277,12 @@ future<> raft_commitlog_replay_buffer::process_raft_replayed_items(replica::data
                         .id = raft::snapshot_id(utils::make_random_uuid()),
                     });
             logger.debug("group {}: advanced snapshot to idx={}, term={}", group_id, commit_idx, *last_committed_term);
+        }
+
+        if (last_dropped_configuration) {
+            logger.debug("group {}: dropped {} committed configuration entries, the last one at idx={}: {}",
+                    group_id, dropped_configurations, last_dropped_configuration->idx,
+                    std::get<raft::configuration>(last_dropped_configuration->data));
         }
 
         logger.debug("group {}: discarded_leader_change={}, applied={}, rewritten={}, total_in_log={}", group_id, filtered.discarded_leader_change, applied,

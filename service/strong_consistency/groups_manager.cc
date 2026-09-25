@@ -300,6 +300,11 @@ future<> groups_manager::start_raft_group(global_tablet_id tablet,
         .persistence = persistence_ref,
         .state_machine = state_machine_ref
     }, get_tick_interval());
+
+    // Elections count votes against this configuration, so a restarted server that
+    // comes back with a different one than its peers is visible here.
+    logger.debug("start_raft_group(): tablet {}, group id {}: started with configuration {}",
+        tablet, group_id, _raft_gr.get_server(group_id).get_configuration());
 }
 
 void groups_manager::schedule_raft_group_deletion(raft::group_id id, raft_group_state& state) {
