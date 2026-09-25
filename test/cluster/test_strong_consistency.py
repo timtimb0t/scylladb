@@ -2249,6 +2249,54 @@ async def test_restart_after_rf_increase_keeps_raft_config(manager: ScyllaCluste
                                       "the RF change as voters")
 
 
+# This test currently fails for the same reason as the RF increase one above: the
+# restarted replica falls back to the configuration its group was bootstrapped with.
+async def test_restart_after_rf_decrease_keeps_raft_config(manager: ScyllaClusterManager):
+    """The last replica left by an RF decrease must still lead its group after a restart.
+
+    RF 3 -> 2 -> 1 leaves the group with A alone. The dropped replicas tear their
+    raft servers down and erase their raft state, so if the restarted A falls back
+    to the bootstrap configuration {A, B, C}, it needs a vote nobody can give and
+    the tablet stays without a leader for good - with every node up.
+    """
+    servers = await manager.servers_add(3, config=DEFAULT_CONFIG, cmdline=DEFAULT_CMDLINE, property_file=[
+        {'dc': 'dc1', 'rack': 'rack1'},
+        {'dc': 'dc1', 'rack': 'rack2'},
+        {'dc': 'dc1', 'rack': 'rack3'},
+    ])
+    cql, _ = await manager.get_ready_cql(servers)
+    host_ids = await gather_safely(*[manager.get_host_id(s.server_id) for s in servers])
+
+    await manager.disable_tablet_balancing()
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': ['rack1', 'rack2', 'rack3']} "
+                                         "AND tablets = {'initial': 1} AND consistency = 'global'") as ks:
+        async with new_test_table(manager, ks, "pk int PRIMARY KEY, c int") as table:
+            table_name = table.split('.')[-1]
+            group_id = await get_table_raft_group_id(manager, ks, table_name)
+
+            await insert_rows(cql, table, range(10))
+
+            for racks in (['rack1', 'rack2'], ['rack1']):
+                await change_rf(manager, servers[0], cql, ks, racks)
+
+            tablets = await get_all_tablet_replicas(manager, servers[0], ks, table_name)
+            assert len(tablets) == 1
+            assert [host_id for host_id, _ in tablets[0].replicas] == [host_ids[0]], \
+                f"Expected the only replica on rack1, got {tablets[0].replicas}"
+
+            # Move the commit index past the configuration entries, so that replay
+            # treats them as committed.
+            await insert_rows(cql, table, range(10, 20))
+
+            logger.info(f"Restarting the last replica {host_ids[0]}")
+            await manager.server_restart(servers[0].server_id)
+            cql, hosts = await manager.get_ready_cql(servers)
+
+            await wait_for_leader(manager, servers[0], group_id, expected_host_id=host_ids[0])
+            await check_rows(cql, table, range(20), host=hosts[0])
+
+
 async def test_removenode(manager: ScyllaClusterManager):
     """removenode of a replica rebuilds the tablet on another node of the same rack.
 
