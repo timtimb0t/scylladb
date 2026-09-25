@@ -12,7 +12,7 @@ from test.pylib.scylla_cluster_manager import ScyllaClusterManager
 from test.pylib.util import gather_safely, wait_for, Host
 from test.cluster.util import ensure_raft_group_leader_on, new_test_keyspace, new_test_table
 from test.pylib.internal_types import HostID, ServerInfo
-from cassandra import InvalidRequest, ReadTimeout, WriteTimeout
+from cassandra import InvalidRequest, OperationTimedOut, ReadTimeout, Unavailable, WriteFailure, WriteTimeout
 from cassandra.cluster import ConsistencyLevel
 from cassandra.policies import FallthroughRetryPolicy
 from cassandra.protocol import InvalidRequest
@@ -2147,6 +2147,106 @@ async def test_rf_decrease(manager: ScyllaClusterManager):
             await insert_rows(cql, table, range(10, 20))
             for server, host in zip(servers[:2], hosts[:2]):
                 await check_new_replica_serves_data(manager, server, host, group_id, cql, table, range(20))
+
+
+async def change_rf(manager: ScyllaClusterManager, server: ServerInfo, cql, ks: str, racks: list[str]):
+    """Replicate `ks` on `racks` of dc1. One DC's RF may change by at most 1 at a time."""
+    logger.info(f"Changing replication to {racks}")
+    await cql.run_async(f"ALTER KEYSPACE {ks} WITH replication = "
+                        f"{{'class': 'NetworkTopologyStrategy', 'dc1': {racks}}}")
+    await manager.api.quiesce_topology(server.ip_addr)
+
+
+# This test currently fails, deliberately left unmarked: commitlog replay drops
+# committed raft configuration entries and leaves the snapshot configuration as it
+# was, so a restarted replica falls back to the configuration its group was
+# bootstrapped with.
+@pytest.mark.skip_mode(mode="release", reason="error injections are not supported in release mode")
+async def test_restart_after_rf_increase_keeps_raft_config(manager: ScyllaClusterManager):
+    """A replica restarted after an RF increase must still count the new replicas as voters.
+
+    The group is bootstrapped on A, B and C, and the RF increases 3 -> 4 -> 5 add D
+    and E through configuration entries in the raft log. Those entries live only in
+    the commitlog. On restart, replay applies every entry up to the persisted commit
+    index and drops it from the log, advancing the snapshot index but not the
+    snapshot configuration - so A comes back with {A, B, C}.
+
+    With C, D and E down, A and B are a quorum of {A, B, C} but not of all five
+    replicas, so they must not acknowledge a write. An increase that keeps the
+    quorum size, like 2 -> 3, loses availability instead, which a write doesn't show.
+
+    Only A may lead. B voting for A is what the bug relies on, and a B that had led
+    would have entries A lacks and never vote for it, hiding the bug rather than
+    fixing it.
+    """
+    initial_rf, final_rf = 3, 5
+    racks = [f'rack{i + 1}' for i in range(final_rf)]
+    servers = [await manager.server_add(config=DEFAULT_CONFIG, cmdline=DEFAULT_CMDLINE,
+                                        property_file={'dc': 'dc1', 'rack': racks[0]})]
+    servers += await manager.servers_add(final_rf - 1, cmdline=DEFAULT_CMDLINE,
+                                         config=DEFAULT_CONFIG | {'error_injections_at_startup': ['avoid_being_raft_leader']},
+                                         property_file=[{'dc': 'dc1', 'rack': rack} for rack in racks[1:]])
+    cql, _ = await manager.get_ready_cql(servers)
+    host_ids = await gather_safely(*[manager.get_host_id(s.server_id) for s in servers])
+
+    await manager.disable_tablet_balancing()
+
+    async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'dc1': {racks[:initial_rf]}}} "
+                                          "AND tablets = {'initial': 1} AND consistency = 'global'") as ks:
+        async with new_test_table(manager, ks, "pk int PRIMARY KEY, c int") as table:
+            table_name = table.split('.')[-1]
+            group_id = await get_table_raft_group_id(manager, ks, table_name)
+
+            await insert_rows(cql, table, range(10))
+
+            for rf in range(initial_rf + 1, final_rf + 1):
+                await change_rf(manager, servers[0], cql, ks, racks[:rf])
+
+            tablets = await get_all_tablet_replicas(manager, servers[0], ks, table_name)
+            assert len(tablets) == 1
+            assert {host_id for host_id, _ in tablets[0].replicas} == set(host_ids), \
+                f"Expected replicas on all {final_rf} nodes, got {tablets[0].replicas}"
+
+            # Move the commit index past the configuration entries, so that replay
+            # treats them as committed.
+            await insert_rows(cql, table, range(10, 20))
+
+            # A quorum of the initial replicas, restarted node included - too few
+            # for a quorum of all of them.
+            survivors = servers[:initial_rf // 2 + 1]
+            stopped = servers[len(survivors):]
+            assert len(survivors) < final_rf // 2 + 1
+
+            logger.info(f"Stopping {len(stopped)} of {final_rf} nodes, then restarting {servers[0]}")
+            for s in stopped:
+                await manager.server_stop_gracefully(s.server_id)
+            await manager.server_restart(servers[0].server_id)
+            cql, _ = await manager.get_ready_cql(survivors)
+
+            # Give the restarted node the time to win an election it shouldn't be
+            # able to, or a write sent meanwhile only waits for a leader and times out.
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                if await manager.api.get_raft_leader(servers[0].ip_addr, group_id) == host_ids[0]:
+                    logger.info(f"{host_ids[0]} leads group {group_id} without a quorum of its replicas")
+                    break
+                await asyncio.sleep(0.5)
+
+            acknowledged = False
+            try:
+                await insert_rows(cql, table, [100])
+                acknowledged = True
+            except (WriteTimeout, WriteFailure, Unavailable, OperationTimedOut) as e:
+                logger.info(f"Write without quorum failed as expected: {e!r}")
+
+            # Group0 has no quorum either, so the keyspace can't be dropped on exit
+            # until the stopped nodes are back.
+            for s in stopped:
+                await manager.server_start(s.server_id)
+
+            assert not acknowledged, (f"A write was acknowledged by {len(survivors)} of {final_rf} replicas: "
+                                      f"after restart, {host_ids[0]} does not count the replicas added by "
+                                      "the RF change as voters")
 
 
 async def test_removenode(manager: ScyllaClusterManager):
