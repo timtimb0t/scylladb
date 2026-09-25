@@ -2297,6 +2297,60 @@ async def test_restart_after_rf_decrease_keeps_raft_config(manager: ScyllaCluste
             await check_rows(cql, table, range(20), host=hosts[0])
 
 
+# This test currently fails for the same reason as the RF change ones above: the
+# restarted replica falls back to the configuration its group was bootstrapped with.
+async def test_restart_after_migration_keeps_raft_config(manager: ScyllaClusterManager):
+    """A replica a tablet was migrated to must still lead its group after a restart.
+
+    A migration changes the group's configuration the same way an RF change does -
+    run_config_sync() calls modify_config() - so it loses the change to the same
+    replay, and this is not a quirk of changing the RF.
+
+    With RF=1 the migrated-to replica is the whole configuration, and it was
+    bootstrapped with an empty one, so falling back leaves the group with no member
+    that could elect itself and the tablet has no leader, with every node up.
+    """
+    servers = await manager.servers_add(2, config=DEFAULT_CONFIG, cmdline=DEFAULT_CMDLINE,
+                                        property_file=[{'dc': 'dc1', 'rack': 'rack1'}] * 2)
+    cql, _ = await manager.get_ready_cql(servers)
+    host_ids = await gather_safely(*[manager.get_host_id(s.server_id) for s in servers])
+
+    await manager.disable_tablet_balancing()
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': ['rack1']} "
+                                         "AND tablets = {'initial': 1} AND consistency = 'global'") as ks:
+        async with new_test_table(manager, ks, "pk int PRIMARY KEY, c int") as table:
+            table_name = table.split('.')[-1]
+            group_id = await get_table_raft_group_id(manager, ks, table_name)
+
+            await insert_rows(cql, table, range(10))
+
+            [tablet] = await get_all_tablet_replicas(manager, servers[0], ks, table_name)
+            [(src_host_id, src_shard)] = tablet.replicas
+            dst_host_id = next(host_id for host_id in host_ids if host_id != src_host_id)
+            dst_server = servers[host_ids.index(dst_host_id)]
+
+            logger.info(f"Migrating the only replica from {src_host_id}:{src_shard} to {dst_host_id}:0")
+            await manager.api.move_tablet(servers[0].ip_addr, ks, table_name,
+                                          src_host_id, src_shard, dst_host_id, 0, tablet.last_token)
+            await manager.api.quiesce_topology(servers[0].ip_addr)
+
+            [tablet] = await get_all_tablet_replicas(manager, servers[0], ks, table_name)
+            assert [host_id for host_id, _ in tablet.replicas] == [dst_host_id], \
+                f"Expected the only replica on {dst_host_id}, got {tablet.replicas}"
+
+            # Move the commit index past the configuration entries, so that replay
+            # treats them as committed.
+            await insert_rows(cql, table, range(10, 20))
+
+            logger.info(f"Restarting the migrated-to replica {dst_host_id}")
+            await manager.server_restart(dst_server.server_id)
+            cql, hosts = await manager.get_ready_cql(servers)
+
+            await wait_for_leader(manager, dst_server, group_id, expected_host_id=dst_host_id)
+            await check_rows(cql, table, range(20), host=hosts[servers.index(dst_server)])
+
+
 async def test_removenode(manager: ScyllaClusterManager):
     """removenode of a replica rebuilds the tablet on another node of the same rack.
 
