@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Tuple
 
 from test.pylib.scylla_cluster_manager import ScyllaClusterManager
-from test.pylib.util import gather_safely, wait_for, Host
+from test.pylib.util import gather_safely, unique_name, wait_for, Host
 from test.cluster.util import ensure_raft_group_leader_on, new_test_keyspace, new_test_table
 from test.pylib.internal_types import HostID, ServerInfo
 from cassandra import InvalidRequest, ReadTimeout, WriteTimeout
@@ -2060,6 +2060,109 @@ async def test_tablet_migration_rollback(manager: ScyllaClusterManager):
             rows = await cql.run_async(f"SELECT * FROM {table} WHERE pk = 100")
             assert len(rows) == 1
             assert rows[0].c == 101
+
+
+@pytest.mark.skip_mode(mode="release", reason="error injections are not supported in release mode")
+async def test_tablet_migration_pending_replica_skips_start_migration(manager: ScyllaClusterManager):
+    """
+    A pending replica allocates the tablet's storage only when it observes the
+    start_migration (allow_write_both_read_old) stage, but it starts the tablet's
+    raft server at any later stage too. A node lagging behind in group 0 can apply
+    the start_migration and sc_add_nonvoter commands in one batch and never observe
+    start_migration. Then it joins the raft group without storage, and applying
+    the group's entries fails with "Storage wasn't found for tablet", which aborts
+    the node. Nothing makes the coordinator wait for the pending replica between
+    those two stages, so the test holds the pending replica's group 0 applier
+    until the coordinator moves past start_migration.
+    """
+    logger.info("Bootstrapping cluster")
+    cmdline = [
+        '--logger-log-level', 'sc_groups_manager=debug',
+        '--logger-log-level', 'raft_topology=debug',
+        '--logger-log-level', 'group0_raft_sm=trace',
+        '--logger-log-level', 'debug_error_injection=debug'
+    ]
+    servers = await manager.servers_add(4, config=DEFAULT_CONFIG, cmdline=cmdline, property_file=[
+        {'dc': 'dc1', 'rack': 'rack1'},
+        {'dc': 'dc1', 'rack': 'rack3'},
+        {'dc': 'dc1', 'rack': 'rack3'},
+        {'dc': 'dc1', 'rack': 'rack2'},
+    ])
+    cql, hosts = await manager.get_ready_cql(servers)
+    host_ids = await gather_safely(*[manager.get_host_id(s.server_id) for s in servers])
+
+    await manager.disable_tablet_balancing()
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3} AND tablets = {'initial': 1} AND consistency = 'global'") as ks:
+        async with new_test_table(manager, ks, "pk int PRIMARY KEY, c int") as table:
+            table_name = table.split('.')[-1]
+
+            tablets = await get_all_tablet_replicas(manager, servers[0], ks, table_name)
+            assert len(tablets) == 1
+            tablet_token = tablets[0].last_token
+            original_replicas = tablets[0].replicas
+
+            # The pending replica applies these from the group's log once it joins.
+            for i in range(10):
+                await cql.run_async(f"INSERT INTO {table} (pk, c) VALUES ({i}, {i+1})")
+
+            rack3 = [host_ids[1], host_ids[2]]
+            src_host_id, src_shard = next((host_id, shard) for host_id, shard in original_replicas if host_id in rack3)
+            dst_host_id = next(host_id for host_id in rack3 if host_id != src_host_id)
+            dst_server = servers[host_ids.index(dst_host_id)]
+
+            # Stall the pending replica's group 0 applier on an unrelated command, so
+            # that the migration's commands queue up behind it and get applied together.
+            # Any group 0 command would do. A service level touches neither schema nor
+            # topology: a DDL statement would make the driver wait for schema agreement,
+            # and toggling tablet balancing would involve the topology coordinator.
+            # The statement completes only after a read barrier on every node, so it
+            # cannot be awaited before the applier is released.
+            dst_log = await manager.server_open_log(dst_server.server_id)
+            mark = await dst_log.mark()
+            await manager.api.enable_injection(dst_server.ip_addr, "group0_state_machine::block_apply", one_shot=True)
+            stalling_command = cql.run_async(f"CREATE SERVICE LEVEL {unique_name('sl_')}", host=hosts[0])
+            await dst_log.wait_for("group0_state_machine::block_apply: waiting for message", from_mark=mark, timeout=60)
+
+            logger.info(f"Migrating replica from {src_host_id}:{src_shard} to {dst_host_id}:0")
+            move_task = asyncio.create_task(
+                manager.api.move_tablet(servers[0].ip_addr, ks, table_name, src_host_id, src_shard, dst_host_id, 0, tablet_token,
+                                        timeout=120))
+
+            # Release the applier once the coordinator has either moved past
+            # start_migration or is waiting on a barrier the pending replica must
+            # answer - whichever comes first, nothing more can happen without it.
+            async def coordinator_moved_on():
+                tablet_info = await get_tablet_info(manager, servers[0], ks, table_name, tablet_token)
+                if tablet_info.stage not in (None, 'allow_write_both_read_old'):
+                    logger.info(f"Coordinator moved the tablet to {tablet_info.stage}")
+                    return True
+                if await dst_log.grep("barrier_and_drain index=.*: starting read_barrier", from_mark=mark):
+                    logger.info("Coordinator waits for the pending replica on a barrier")
+                    return True
+                return None
+            await wait_for(coordinator_moved_on, time.time() + 60)
+            await manager.api.message_injection(dst_server.ip_addr, "group0_state_machine::block_apply")
+            await stalling_command
+
+            # A pending replica without storage aborts, and move_tablet then waits for
+            # it until the timeout, so watch the replica's log alongside.
+            storage_missing = asyncio.create_task(dst_log.wait_for("Storage wasn't found for tablet", from_mark=mark, timeout=120))
+            await asyncio.wait([move_task, storage_missing], return_when=asyncio.FIRST_COMPLETED)
+            if storage_missing.done() and not storage_missing.exception():
+                move_task.cancel()
+                pytest.fail(f"The pending replica joined the tablet's raft group without its storage: {storage_missing.result()[1][0][0]}")
+            storage_missing.cancel()
+            await move_task
+
+            await manager.api.quiesce_topology(servers[0].ip_addr)
+            tablets = await get_all_tablet_replicas(manager, servers[0], ks, table_name)
+            assert (dst_host_id, 0) in tablets[0].replicas
+
+            await cql.run_async(f"INSERT INTO {table} (pk, c) VALUES (100, 101)")
+            for i in list(range(10)) + [100]:
+                rows = await cql.run_async(f"SELECT * FROM {table} WHERE pk = {i}")
+                assert len(rows) == 1 and rows[0].c == i + 1, f"Unexpected rows for pk={i}: {rows}"
 
 
 async def test_rf_change(manager: ScyllaClusterManager):
