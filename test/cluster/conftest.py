@@ -21,6 +21,7 @@ from test.cluster.util import FeatureConfig
 from test.pylib.async_cql import run_async
 from test.pylib.connect_options import add_cql_connection_options, add_s3_options
 from test.pylib.encryption_provider import KeyProvider, make_key_provider_factory
+from test.pylib.network import NetworkPartition, require_test_netns
 from test.pylib.object_storage import Storage, StorageFactory, StorageKind, create_gs_server, create_s3_server, format_tuples
 from test.pylib.random_tables import RandomTables
 from test.pylib.runner import PHASE_REPORT_KEY, SEASTAR_IO_KEY, make_failed_test_dir
@@ -310,6 +311,20 @@ async def key_provider(request, tmpdir, suite_log_dir, scylla_binary):
 @pytest.fixture(scope="function")
 def failure_detector_timeout(build_mode):
     return 5000 * MODES_TIMEOUT_FACTOR[build_mode]
+
+
+@pytest.fixture
+async def network() -> AsyncGenerator[NetworkPartition]:
+    """Cuts between the nodes of the test cluster, all removed on teardown.
+
+    Needs the private network namespace test.py runs in; fails outside of it.
+    """
+    require_test_netns()
+    partition = NetworkPartition(unique_name())
+    try:
+        yield partition
+    finally:
+        await partition.heal()
 
 
 @pytest.fixture(params=[None, "s3", "gs"], ids=["local", "s3", "gs"])

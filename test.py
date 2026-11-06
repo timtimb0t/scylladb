@@ -73,6 +73,11 @@ def _ensure_running_under_uv() -> None:
 
 if __name__ == "__main__":
     _ensure_running_under_uv()
+    # Everything below -- the harness, its pytest workers, every Scylla
+    # process -- runs inside one private network namespace, so that tests
+    # can cut the network between nodes without root. See test/pylib/network.py.
+    from test.pylib.network import reexec_in_test_netns
+    reexec_in_test_netns()
 
 import argparse
 import asyncio
@@ -168,6 +173,9 @@ def parse_cmd_line() -> argparse.Namespace:
     parser.add_argument("--tmpdir", action="store", default=str(TOP_SRC_DIR / "testlog"),
                         help="Path to temporary test data and log files.  The data is further segregated per build mode.")
     parser.add_argument("--gather-metrics", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--no-netns", action="store_true", default=False,
+                        help="Run on the host network instead of a private network namespace; "
+                             "tests that partition the network then fail.")
     parser.add_argument("--max-failures", type=int, default=0,
                         help="Maximum number of failures to tolerate before cancelling rest of tests.")
     parser.add_argument('--mode', choices=ALL_MODES, action="append", dest="modes",

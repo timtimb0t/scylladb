@@ -391,6 +391,25 @@ extend the options of a used server, you can do it by adding
 `extra_scylla_cmdline_options` or `extra_scylla_config_options`
 to your test_config.yaml.
 
+### Network namespace
+
+`test.py` runs inside a private user and network namespace it builds
+for itself at startup (`unshare`, no root needed): the harness, its
+pytest workers and every server share one loopback device of their
+own, on the same `127.*.*.*` addresses as before, over which `test.py`
+holds `CAP_NET_ADMIN`. That lets the `network` fixture
+(`test/pylib/network.py`) cut, reset or degrade the links between
+servers, or between the driver and a server, with `nft` rules, as a
+test needs. The namespace maps the user to root and the user's
+`/etc/subuid` range above it, the layout rootless podman builds for
+itself, so the containers the harness starts (the S3 mock, for one)
+keep working inside; `pasta`, attached from outside, gives the
+namespace a way out to the host's network for downloads. Everything
+in it, rules and processes alike, goes away with the run. Where the
+namespace cannot be built, `test.py` says so and runs on the host
+network; only the tests that need the namespace then fail.
+`--no-netns` skips the namespace on purpose.
+
 ## Topology pytests
 
 Some pytest suites run against Scylla clusters
