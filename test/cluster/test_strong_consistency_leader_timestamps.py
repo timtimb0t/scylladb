@@ -70,19 +70,20 @@ class Cluster:
 
 
 @asynccontextmanager
-async def cluster_with_skewed_leader(manager: ScyllaClusterManager):
+async def cluster_with_skewed_leader(manager: ScyllaClusterManager, config: dict = DEFAULT_CONFIG,
+                                     table_options: str = ""):
     """Set up a strongly consistent table whose raft group is led by a node with its clock an
     hour ahead. Of the two other replicas, only the new leader can ever take over: the third
     one never campaigns."""
-    old_leader, new_leader = await manager.servers_add(2, config=DEFAULT_CONFIG, cmdline=DEFAULT_CMDLINE,
+    old_leader, new_leader = await manager.servers_add(2, config=config, cmdline=DEFAULT_CMDLINE,
                                                        auto_rack_dc='dc1')
-    third = await manager.server_add(config=DEFAULT_CONFIG | {'error_injections_at_startup': [AVOID_LEADERSHIP]},
+    third = await manager.server_add(config=config | {'error_injections_at_startup': [AVOID_LEADERSHIP]},
                                      cmdline=DEFAULT_CMDLINE, property_file={'dc': 'dc1', 'rack': 'rack3'})
     cql, [old_leader_host, new_leader_host, _] = await manager.get_ready_cql([old_leader, new_leader, third])
 
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3}"
                                           " AND tablets = {'initial': 1} AND consistency = 'global'") as ks:
-        async with new_test_table(manager, ks, "pk int PRIMARY KEY, v int") as table:
+        async with new_test_table(manager, ks, "pk int PRIMARY KEY, v int", table_options) as table:
             table_name = table.split('.')[-1]
             group_id = await get_table_raft_group_id(manager, ks, table_name)
             await ensure_raft_group_leader_on(manager, old_leader, group_id, timeout_seconds=WAIT_TIMEOUT_S)
